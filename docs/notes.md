@@ -98,3 +98,79 @@ Note: seasons have different lengths, so compare averages, not counts.
 ## Next steps
 - Gold layer: star schema (fact and dimension tables)
 - Advanced SQL analysis
+---
+
+## Day 2: Gold layer (star schema)
+
+### Stations data
+- bronze_stations: 230 stations, 127 cities, 21 states
+- One city can have several stations; the table includes cities not in city_day
+- Matched our 26 cities to their states with a LEFT JOIN: all 26 matched,
+  no nulls, no duplicates
+
+### Gold tables
+| Table | Rows | Description |
+|---|---|---|
+| dim_city | 26 | city_id, city, state, region |
+| dim_date | 4,748 | date_id, date, year, month, month_name, season, day_name, is_weekend |
+| dim_pollutant | 6 | pollutant_id, code, name, unit, safe_limit, limit_period |
+| fact_aqi_daily | 24,850 | city_id, date_id, pollutants, aqi, aqi_category, aqi_more_500, source |
+
+### Design decisions
+- **IDs instead of names** in the fact table: smaller storage, faster joins;
+  names stored once in dimension tables
+- **city_id** created with ROW_NUMBER() (alphabetical order)
+- **date_id** in yyyyMMdd format (e.g. 20150129): unique and readable
+- **dim_date covers 2015-2027**, not just 2015-2020, so live API data
+  from 2026 already has matching dates
+- **Regions** assigned by state: North, South, East, West, Central, Northeast
+- **source column** in fact table ("historic" now, "live" later) to track
+  where each row came from
+- **Units stored in dim_pollutant**: CO is in mg/m³, others in µg/m³
+  (fixed a unit entry error during build)
+- Safe limits from India's National Ambient Air Quality Standards (NAAQS)
+
+### Region distribution
+South 9, North 6, East 5, Northeast 3, West 2, Central 1
+
+### Star schema check: average AQI by region (excluding AQI > 500)
+| Region | Cities | Avg AQI |
+|---|---|---|
+| West | 2 | 206.6 |
+| North | 6 | 195.1 |
+| East | 5 | 180.9 |
+| Central | 1 | 132.8 |
+| Northeast | 3 | 101.9 |
+| South | 9 | 101.4 |
+
+### Insight (with caveats)
+- North and East India show consistently high average AQI (195 and 181)
+- West appears highest (207), but this is NOT reliable:
+  - only 2 cities (Ahmedabad, Mumbai)
+  - Ahmedabad's faulty CO values inflate AQI even below 500
+  - Mumbai is missing 61% of AQI values
+- Northeast and Central cities only have 2019-2020 data, including the 2020
+  lockdown, so their averages may look better partly due to timing
+- South India has the cleanest air (101) across 9 cities, the most reliable
+  regional result
+- Next step: compare regions over the same time period for a fair comparison
+
+### Skills used
+- SQL: LEFT JOIN, INNER JOIN, table aliases, subqueries, ROW_NUMBER()
+  (window function), SEQUENCE + EXPLODE, CAST, DATE_FORMAT, DAYOFWEEK,
+  VALUES, UPDATE with WHERE, ALTER TABLE RENAME, ROUND, AVG
+- Concepts: star schema, fact vs dimension tables, surrogate keys,
+  designing for future data, validating results before trusting them
+
+### Errors fixed
+- CASE vs CAST mix-up
+- Table created as dim_table instead of dim_date (renamed)
+- DATE FORMAT missing underscore (DATE_FORMAT)
+- CO unit entered as µg/m³ instead of mg/m³ (fixed with UPDATE)
+
+---
+
+## Next steps
+- Advanced SQL analysis: window functions, CTEs, ranking,
+  year-over-year comparisons
+- Fair comparisons using the same time period for all cities
