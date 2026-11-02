@@ -1,0 +1,11 @@
+# Secrets
+*.txt
+.env
+
+# Data files
+*.csv
+data/
+
+# Python
+__pycache__/
+venv/
