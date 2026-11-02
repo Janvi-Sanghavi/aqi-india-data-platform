@@ -5,13 +5,23 @@ Help authorities and citizens anticipate poor air quality days and understand
 what drives them, using reliable, automatically updated pollution data.
 
 ## Data sources
-- Historic: Kaggle "Air Quality Data in India (2015-2020)" by Vopani (CPCB data)
+- **Historic:** Kaggle "Air Quality Data in India (2015-2020)" by Vopani (CPCB data)
   - city_day.csv: daily pollutants and AQI per city
   - stations.csv: station names, cities, states
-- Live (upcoming): data.gov.in "Real time Air Quality Index from various locations"
+- **Live (in progress):** data.gov.in "Real time Air Quality Index from various locations"
+  - Resource ID: 3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69
+  - Publisher: CPCB / Ministry of Environment, Forest and Climate Change
 
-## Platform
-Databricks Free Edition (catalog: workspace, schema: aqi)
+## Platform and tools
+- Databricks Free Edition (catalog: workspace, schema: aqi)
+- SQL and PySpark in Databricks
+- Python 3.13 + VS Code for the live ingestion script
+- Git + GitHub (repo: aqi-india-data-platform)
+
+## Architecture (medallion)
+- **Bronze:** raw data exactly as received (never edited)
+- **Silver:** cleaned, corrected, standardized data
+- **Gold:** star schema, ready for dashboards and models
 
 ---
 
@@ -41,6 +51,8 @@ Databricks Free Edition (catalog: workspace, schema: aqi)
   Chennai, Lucknow, Ahmedabad, Hyderabad (from 4 Jan 2015)
 - 8 cities started in 2019 or 2020; Aizawl has only 113 days
 - Mumbai is missing 61% of AQI values; Ahmedabad 34%; Delhi only 0.5%
+- Mumbai has NO AQI data at all for 2015-2017 (whole years empty,
+  not random gaps)
 
 ---
 
@@ -51,6 +63,8 @@ Databricks Free Edition (catalog: workspace, schema: aqi)
    Two different gases cannot match this often, so this is a recording error.
 2. **AQI above 500:** 543 readings exceed India's AQI scale maximum of 500.
    Ahmedabad accounts for 412 of them, likely inflated by the faulty CO values.
+   Example: 2 Feb 2015, AQI 914 with PM2.5 only 178 (PM2.5 alone would give
+   roughly 300-400), so AQI was pushed up by the faulty CO.
 3. **Zeros in Benzene and Toluene:** may mean "not measured" rather than zero.
 
 ### Cleaning decisions
@@ -75,29 +89,22 @@ Databricks Free Edition (catalog: workspace, schema: aqi)
 | Post-Monsoon | 3,825 |
 Note: seasons have different lengths, so compare averages, not counts.
 
----
+### AQI category counts
+| Category | Days | % |
+|---|---|---|
+| Moderate | 8,829 | 36% |
+| Satisfactory | 8,224 | 33% |
+| Poor | 2,781 | 11% |
+| Very Poor | 2,337 | 9% |
+| Good | 1,341 | 5% |
+| Severe | 1,338 | 5% |
 
-## First insights
-- About 26% of recorded days were Poor or worse (6,456 of 24,850)
-- Only about 5% of days had Good air quality (1,341 days)
-- Severe count is likely inflated by Ahmedabad's faulty CO data
+### Delta features used
+- DESCRIBE HISTORY: every change to the table is recorded (25 versions)
+- Time travel: `VERSION AS OF 0` showed the first silver table
+  (city, date, aqi only)
+- Lesson: use "Run selected", not "Run all" (Run all created extra versions)
 
----
-
-## Skills used
-- SQL: CREATE SCHEMA/VOLUME/TABLE, read_files, COUNT, DISTINCT, MIN/MAX,
-  GROUP BY, ORDER BY, WHERE, CASE WHEN, ALTER TABLE, UPDATE, DESCRIBE HISTORY,
-  VERSION AS OF (time travel)
-- PySpark: spark.table, filter, select, alias, withColumn, when/otherwise,
-  isin, year, month, groupBy, partitionBy, saveAsTable, exceptAll
-- Concepts: medallion architecture, Delta tables, data profiling,
-  data quality checks, partitioning
-
----
-
-## Next steps
-- Gold layer: star schema (fact and dimension tables)
-- Advanced SQL analysis
 ---
 
 ## Day 2: Gold layer (star schema)
@@ -121,13 +128,12 @@ Note: seasons have different lengths, so compare averages, not counts.
   names stored once in dimension tables
 - **city_id** created with ROW_NUMBER() (alphabetical order)
 - **date_id** in yyyyMMdd format (e.g. 20150129): unique and readable
-- **dim_date covers 2015-2027**, not just 2015-2020, so live API data
-  from 2026 already has matching dates
+- **dim_date covers 2015-2027** (4,748 days incl. 3 leap days), so live
+  API data from 2026 already has matching dates
 - **Regions** assigned by state: North, South, East, West, Central, Northeast
 - **source column** in fact table ("historic" now, "live" later) to track
   where each row came from
 - **Units stored in dim_pollutant**: CO is in mg/m³, others in µg/m³
-  (fixed a unit entry error during build)
 - Safe limits from India's National Ambient Air Quality Standards (NAAQS)
 
 ### Region distribution
@@ -153,14 +159,6 @@ South 9, North 6, East 5, Northeast 3, West 2, Central 1
   lockdown, so their averages may look better partly due to timing
 - South India has the cleanest air (101) across 9 cities, the most reliable
   regional result
-- Next step: compare regions over the same time period for a fair comparison
-
-### Skills used
-- SQL: LEFT JOIN, INNER JOIN, table aliases, subqueries, ROW_NUMBER()
-  (window function), SEQUENCE + EXPLODE, CAST, DATE_FORMAT, DAYOFWEEK,
-  VALUES, UPDATE with WHERE, ALTER TABLE RENAME, ROUND, AVG
-- Concepts: star schema, fact vs dimension tables, surrogate keys,
-  designing for future data, validating results before trusting them
 
 ### Errors fixed
 - CASE vs CAST mix-up
@@ -170,7 +168,178 @@ South 9, North 6, East 5, Northeast 3, West 2, Central 1
 
 ---
 
+## Day 2: Advanced SQL analysis
+
+### Query 1: Average AQI per city per year
+- Used only the 7 cities with full data since 2015 (fair comparison)
+- Excluded AQI > 500 readings
+
+### Query 2: Year-over-year change (CTE + LAG)
+- Used 2015-2019 only and 5 reliable cities
+  (excluded Mumbai: no early data; Ahmedabad: sensor error)
+- 2020 excluded from trends: data ends in July (no Oct-Dec winter months)
+  and includes the COVID lockdown
+
+| City | 2015 | 2019 | Change |
+|---|---|---|---|
+| Delhi | 297.0 | 223.1 | -25% |
+| Chennai | 148.3 | 102.9 | -31% |
+| Hyderabad | 140.2 | 94.0 | -33% |
+| Bengaluru | 112.6 | 91.6 | -19% |
+| Lucknow | 191.2 | 202.6 | +6% |
+
+**Insights**
+- Delhi and Hyderabad improved every single year from 2015 to 2019
+- Largest single-year drops in 2017 (Delhi -35.6, Chennai -34.1)
+  - Open question: what changed in 2017? (not yet researched)
+- Lucknow jumped +48 in 2016 and shows no net improvement over the period
+- Bengaluru worsened slightly in 2019 (+5.3) after three years of improvement
+
+### Query 3: Worst month per city (two CTEs + RANK, top-N per group)
+| City | Worst month | Avg AQI | Category |
+|---|---|---|---|
+| Delhi | Nov | 370 | Very Poor |
+| Lucknow | Nov | 363 | Very Poor |
+| Hyderabad | Jan | 140 | Moderate |
+| Chennai | Jan | 128 | Moderate |
+| Bengaluru | Jan | 112 | Moderate |
+
+**Insight:** North Indian cities peak in November (about 365, Very Poor);
+South Indian cities peak in January but stay Moderate.
+November is commonly associated with crop residue burning, Diwali, and
+still winter air (not proven by this data).
+**Recommendation:** alerts and interventions in North India should focus
+on October-November.
+
+### Query 4: Lockdown effect (conditional aggregation, HAVING)
+- Compared PM2.5 for the same dates (25 Mar - 31 May) in 2019 vs 2020
+- Used PM2.5 instead of AQI: a direct measurement, avoids the Ahmedabad CO issue
+
+**Insights**
+- PM2.5 was lower in all 19 cities with data for both years
+- Median drop about 38%; most cities fell 20-60%
+- Delhi fell 44% (86 to 49 µg/m³)
+- Biggest drops: Ahmedabad -63%, Chennai -54%, Gurugram -50%,
+  Amritsar -50%, Kolkata -50%
+- Industrial towns fell least: Talcher -6%, Brajrajnagar -20%,
+  Jorapokhar -22% (hypothesis: some industrial activity continued)
+- Mumbai -0.6%: likely a monitoring coverage issue (2019 PM2.5 unusually low)
+- Caveat: weather differs between years, so not all of the drop is
+  caused by the lockdown. Statistical test planned.
+
+### Query 5: Fair city ranking for 2019 (RANK, percentages)
+- Share of Poor-or-worse days in 2019, cities with 300+ days of data
+
+| City | Poor-or-worse days | % |
+|---|---|---|
+| Delhi | 194 of 365 | 53% |
+| Lucknow | 167 of 365 | 46% |
+| Patna | 159 of 359 | 44% |
+| Gurugram | 154 of 364 | 42% |
+
+**Insights**
+- Delhi had Poor or worse air on more than half the days of 2019
+- Top cities are all in the Indo-Gangetic plain (North and East India)
+- Hyderabad, Bengaluru, Thiruvananthapuram had ZERO Poor days in 2019
+- Ahmedabad ranked #1 (95%, avg AQI 516) but excluded as unreliable
+  (CO sensor error; this query did not filter AQI > 500)
+- Mumbai (5.5%) looks surprisingly clean, consistent with coverage concerns
+
+### Remaining analysis queries (planned for Day 4)
+- Dominant pollutant per city
+- Weekday vs weekend AQI
+- Diwali effect
+- 7-day rolling average
+- Seasonal averages by region
+- Days exceeding safe limits (using dim_pollutant)
+
+---
+
+## Day 3: Live API ingestion (in progress)
+
+### API explored
+- About 3,878 records available (one row per station per pollutant)
+- Response has metadata (title, org, field list, updated_date) and records
+- Confirmed live: updated_date 2026-11-02
+
+### Live data vs historic data
+| Historic (Kaggle) | Live API |
+|---|---|
+| Wide: one row per city per day | Long: one row per station per pollutant |
+| Pollutants as columns | pollutant_id as rows (PM10, CO, OZONE...) |
+| City-level daily averages | Station-level hourly readings |
+
+### Data quality issues spotted in live data
+- All values are text, including numbers ("52")
+- Missing values written as "NA", not empty
+- Date format dd-MM-yyyy HH:mm:ss (historic uses yyyy-MM-dd)
+- Ozone named "OZONE" (historic uses O3)
+- Includes many more cities than our 26 (e.g. Kadapa, Kakinada)
+- Open question: live values may be on a different basis or unit than
+  historic daily averages; check documentation before comparing
+
+### Setup done
+- Created virtual environment (venv); used Command Prompt because
+  PowerShell blocks scripts by default
+- Installed requests and python-dotenv
+- API key stored in .env (ignored by Git), read with os.getenv
+- Script: ingestion/fetch_live_aqi.py
+
+### Script features so far
+- Reads API key from .env (never written in code)
+- Timeout (90 seconds) so it never waits forever
+- Retries: 3 attempts with backoff (waits 10s, then 20s)
+- raise_for_status() so error responses are also retried
+- Safe error messages: prints only error type and status code,
+  never the URL (which contains the key)
+- Exits cleanly with SystemExit(1) when all attempts fail
+
+### Issues encountered
+- ReadTimeout: server took more than 30 seconds -> increased timeout,
+  added retries
+- 502 Bad Gateway: server-side error (API down/overloaded), not a code issue
+- SECURITY: an error message printed the full URL including the API key
+  -> regenerate key; changed error handling to never print URLs
+  (important for GitHub Actions logs later)
+
+---
+
+## Key insights so far (summary)
+1. About 26% of recorded days were Poor or worse; only 5% were Good
+2. Delhi's average AQI fell 25% from 2015 to 2019, improving every year
+3. North India is worst in November (Very Poor); South India stays Moderate
+4. PM2.5 dropped in all 19 cities during the 2020 lockdown (median -38%)
+5. Delhi had Poor or worse air on 53% of days in 2019
+6. Data reliability matters: Ahmedabad's CO sensor error and Mumbai's
+   missing years would have produced wrong conclusions without checks
+
+---
+
+## Skills used
+- **SQL:** CREATE SCHEMA/VOLUME/TABLE, read_files, COUNT, DISTINCT, MIN/MAX,
+  GROUP BY, ORDER BY, WHERE, CASE WHEN, ALTER TABLE (ADD COLUMN, RENAME),
+  UPDATE, DESCRIBE HISTORY, VERSION AS OF, LEFT/INNER JOIN, aliases,
+  subqueries, CTEs, window functions (ROW_NUMBER, RANK, LAG),
+  PARTITION BY, conditional aggregation, HAVING, BETWEEN, IN,
+  SEQUENCE + EXPLODE, CAST, DATE_FORMAT, DAYOFWEEK, VALUES, ROUND
+- **PySpark:** spark.table, filter, select, alias, withColumn,
+  when/otherwise, isin, year, month, groupBy, partitionBy,
+  saveAsTable, exceptAll
+- **Python:** requests, python-dotenv, os.getenv, dictionaries,
+  for loops, try/except, f-strings, time.sleep, SystemExit
+- **Concepts:** medallion architecture, Delta tables, time travel,
+  data profiling, data quality checks, partitioning, star schema,
+  fact vs dimension tables, surrogate keys, fair comparisons,
+  validating results before trusting them, retries with backoff,
+  secret management
+
+---
+
 ## Next steps
-- Advanced SQL analysis: window functions, CTEs, ranking,
-  year-over-year comparisons
-- Fair comparisons using the same time period for all cities
+1. Regenerate API key and update .env
+2. Run fetch script once the API is available
+3. Add pagination (fetch all ~3,878 records)
+4. Save raw JSON to bronze
+5. Schedule with GitHub Actions every 3 hours (key in GitHub Secrets)
+6. Incremental load with MERGE
+7. Remaining analysis queries + statistics (Day 4)
