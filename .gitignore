@@ -1,5 +1,6 @@
 # Secrets
 *.txt
+!requirements.txt
 .env
 
 # Data files
