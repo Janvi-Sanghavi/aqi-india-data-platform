@@ -1,27 +1,3 @@
-# AQI India Data Platform: Project Notes
-
-## Project goal
-Help authorities and citizens anticipate poor air quality days and understand
-what drives them, using reliable, automatically updated pollution data.
-
-## Data sources
-- **Historic:** Kaggle "Air Quality Data in India (2015-2020)" by Vopani (CPCB data)
-  - city_day.csv: daily pollutants and AQI per city
-  - stations.csv: station names, cities, states
-- **Live (in progress):** data.gov.in "Real time Air Quality Index from various locations"
-  - Resource ID: 3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69
-  - Publisher: CPCB / Ministry of Environment, Forest and Climate Change
-
-## Platform and tools
-- Databricks Free Edition (catalog: workspace, schema: aqi)
-- SQL and PySpark in Databricks
-- Python 3.13 + VS Code for the live ingestion script
-- Git + GitHub (repo: aqi-india-data-platform)
-
-## Architecture (medallion)
-- **Bronze:** raw data exactly as received (never edited)
-- **Silver:** cleaned, corrected, standardized data
-- **Gold:** star schema, ready for dashboards and models
 
 ---
 
@@ -255,12 +231,12 @@ on October-November.
 
 ---
 
-## Day 3: Live API ingestion (in progress)
+## Day 3: Live API ingestion
 
 ### API explored
-- About 3,878 records available (one row per station per pollutant)
+- One row per station per pollutant; about 3,900 records per snapshot
 - Response has metadata (title, org, field list, updated_date) and records
-- Confirmed live: updated_date 2026-11-02
+- Confirmed live: dataset updated on 03/11/2026
 
 ### Live data vs historic data
 | Historic (Kaggle) | Live API |
@@ -268,39 +244,96 @@ on October-November.
 | Wide: one row per city per day | Long: one row per station per pollutant |
 | Pollutants as columns | pollutant_id as rows (PM10, CO, OZONE...) |
 | City-level daily averages | Station-level hourly readings |
+| 26 cities | 289 cities, 557 stations |
 
-### Data quality issues spotted in live data
+### Data quality issues in live data
 - All values are text, including numbers ("52")
 - Missing values written as "NA", not empty
 - Date format dd-MM-yyyy HH:mm:ss (historic uses yyyy-MM-dd)
 - Ozone named "OZONE" (historic uses O3)
 - Includes many more cities than our 26 (e.g. Kadapa, Kakinada)
+- Duplicate reading: Sneh Nagar, Nanded (OZONE, 17:00) appeared twice
+  with identical values
+- Time zone: last_update is IST (Indian local time), but Databricks
+  labels it as UTC; values are correct, the label is misleading
 - Open question: live values may be on a different basis or unit than
   historic daily averages; check documentation before comparing
 
 ### Setup done
 - Created virtual environment (venv); used Command Prompt because
   PowerShell blocks scripts by default
-- Installed requests and python-dotenv
-- API key stored in .env (ignored by Git), read with os.getenv
-- Script: ingestion/fetch_live_aqi.py
+- Installed requests, python-dotenv, databricks-sdk
+- requirements.txt lists packages for GitHub Actions
+- .env holds DATA_GOV_API_KEY, DATABRICKS_HOST, DATABRICKS_TOKEN
+  (ignored by Git)
+- Databricks personal access token created (90-day lifetime)
 
-### Script features so far
-- Reads API key from .env (never written in code)
+### Ingestion script: ingestion/fetch_live_aqi.py
+- Reads secrets from environment (.env locally, GitHub Secrets in the cloud);
+  the same script works in both places with no changes
+- User-Agent header (the server rejected requests that didn't look like
+  a browser, returning 502)
 - Timeout (90 seconds) so it never waits forever
-- Retries: 3 attempts with backoff (waits 10s, then 20s)
-- raise_for_status() so error responses are also retried
+- Retries: 3 attempts per page with backoff (waits 10s, then 20s)
+- Pagination: fetches 1,000 records per page until all are collected
 - Safe error messages: prints only error type and status code,
   never the URL (which contains the key)
-- Exits cleanly with SystemExit(1) when all attempts fail
+- Saves raw JSON with a UTC timestamp in the file name
+  (e.g. aqi_live_20261103_121837.json), plus fetched_at_utc inside the file
+- Uploads the file to /Volumes/workspace/aqi/bronze/live/ with databricks-sdk
+- Exits cleanly with SystemExit(1) on failure (marks the run as failed)
+- First full run: 4 pages, 3,899 of 3,899 records
+
+### Live tables (sql/05_live.sql)
+| Table | Rows (first load) | Description |
+|---|---|---|
+| bronze_live_aqi | 3,899 | Raw records from all JSON files + source_file (lineage) |
+| silver_live_aqi | 3,898 | Cleaned, typed, deduplicated |
+
+### Live data profile (first snapshot, 03-11-2026 17:00 IST)
+| Pollutant | Readings | % NA |
+|---|---|---|
+| OZONE | 558 | 5.7% |
+| NO2 | 557 | 7.2% |
+| CO | 557 | 4.1% |
+| NH3 | 557 | 17.1% |
+| PM10 | 557 | 8.6% |
+| SO2 | 557 | 11.1% |
+| PM2.5 | 556 | 8.3% |
+- OZONE 558 (one duplicate); PM2.5 556 (one station did not report)
+
+### Silver live cleaning
+- TO_TIMESTAMP for dates, CAST for coordinates
+- NULLIF + TRY_CAST: "NA" -> NULL, text -> numbers (TRY_CAST avoids crashing
+  on unexpected values)
+- Pollutant names mapped to historic names (PM2.5 -> pm25, OZONE -> o3)
+- Deduplication with QUALIFY ROW_NUMBER(): keeps the latest fetch per
+  station, pollutant, and reading time. Handles exact repeats AND the same
+  reading fetched in two runs (DISTINCT alone would miss the second case)
+
+### Automation: GitHub Actions
+- Workflow: .github/workflows/ingest_live_aqi.yml
+- Schedule: cron "0 */3 * * *" (every 3 hours, UTC); manual trigger
+  enabled with workflow_dispatch
+- Runs on ubuntu-latest, Python 3.13, 20-minute timeout
+- Secrets stored in GitHub Secrets (masked in logs as ***)
+- Status: committed; manual test run pending
 
 ### Issues encountered
 - ReadTimeout: server took more than 30 seconds -> increased timeout,
   added retries
-- 502 Bad Gateway: server-side error (API down/overloaded), not a code issue
+- 502 Bad Gateway: fixed by adding a User-Agent header
 - SECURITY: an error message printed the full URL including the API key
-  -> regenerate key; changed error handling to never print URLs
-  (important for GitHub Actions logs later)
+  -> changed error handling to never print URLs. The site shows the same
+  key and offers no regeneration; risk is low (public data only)
+- ModuleNotFoundError: databricks-sdk installed outside venv
+  -> reinstalled with (venv) active
+
+### Insight
+- India's monitoring network has grown a lot: 26 cities in the 2015-2020
+  data vs 289 cities and 557 stations in today's live feed
+- Live data is also more complete: PM2.5 missing 8% (vs 16% historically),
+  PM10 missing 9% (vs 38% historically)
 
 ---
 
@@ -310,36 +343,43 @@ on October-November.
 3. North India is worst in November (Very Poor); South India stays Moderate
 4. PM2.5 dropped in all 19 cities during the 2020 lockdown (median -38%)
 5. Delhi had Poor or worse air on 53% of days in 2019
-6. Data reliability matters: Ahmedabad's CO sensor error and Mumbai's
+6. Monitoring coverage grew from 26 cities to 289 cities (557 stations)
+7. Data reliability matters: Ahmedabad's CO sensor error and Mumbai's
    missing years would have produced wrong conclusions without checks
 
 ---
 
 ## Skills used
-- **SQL:** CREATE SCHEMA/VOLUME/TABLE, read_files, COUNT, DISTINCT, MIN/MAX,
-  GROUP BY, ORDER BY, WHERE, CASE WHEN, ALTER TABLE (ADD COLUMN, RENAME),
-  UPDATE, DESCRIBE HISTORY, VERSION AS OF, LEFT/INNER JOIN, aliases,
-  subqueries, CTEs, window functions (ROW_NUMBER, RANK, LAG),
-  PARTITION BY, conditional aggregation, HAVING, BETWEEN, IN,
-  SEQUENCE + EXPLODE, CAST, DATE_FORMAT, DAYOFWEEK, VALUES, ROUND
+- **SQL:** CREATE SCHEMA/VOLUME/TABLE, read_files (CSV and JSON), COUNT,
+  DISTINCT, MIN/MAX, GROUP BY, ORDER BY, WHERE, CASE WHEN, ALTER TABLE
+  (ADD COLUMN, RENAME), UPDATE, DESCRIBE HISTORY, VERSION AS OF,
+  LEFT/INNER JOIN, aliases, subqueries, CTEs, window functions
+  (ROW_NUMBER, RANK, LAG), PARTITION BY, QUALIFY, conditional aggregation,
+  HAVING, BETWEEN, IN, SEQUENCE + EXPLODE, CAST, TRY_CAST, NULLIF,
+  TO_TIMESTAMP, DATE_FORMAT, DAYOFWEEK, VALUES, ROUND, _metadata
 - **PySpark:** spark.table, filter, select, alias, withColumn,
   when/otherwise, isin, year, month, groupBy, partitionBy,
   saveAsTable, exceptAll
-- **Python:** requests, python-dotenv, os.getenv, dictionaries,
-  for loops, try/except, f-strings, time.sleep, SystemExit
+- **Python:** requests (params, headers, timeout), python-dotenv,
+  os.getenv, os.path, functions, docstrings, dictionaries, while/for loops,
+  try/except, f-strings, time.sleep, datetime (UTC), json, file handling,
+  databricks-sdk (WorkspaceClient, files.upload), SystemExit,
+  if __name__ == "__main__"
+- **DevOps:** virtual environments, requirements.txt, .gitignore,
+  GitHub Secrets, GitHub Actions (YAML, cron, workflow_dispatch)
 - **Concepts:** medallion architecture, Delta tables, time travel,
   data profiling, data quality checks, partitioning, star schema,
   fact vs dimension tables, surrogate keys, fair comparisons,
   validating results before trusting them, retries with backoff,
-  secret management
+  pagination, secret management, data lineage, deduplication,
+  time zone handling
 
 ---
 
 ## Next steps
-1. Regenerate API key and update .env
-2. Run fetch script once the API is available
-3. Add pagination (fetch all ~3,878 records)
-4. Save raw JSON to bronze
-5. Schedule with GitHub Actions every 3 hours (key in GitHub Secrets)
-6. Incremental load with MERGE
-7. Remaining analysis queries + statistics (Day 4)
+1. Test the GitHub Actions workflow manually (Run workflow)
+2. Confirm scheduled runs add new files every 3 hours
+3. Incremental load with MERGE (live data into a gold table)
+4. Aggregate live station readings to city level
+5. Data quality framework + pipeline_runs log
+6. Remaining analysis queries + statistics (Day 4)
