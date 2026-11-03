@@ -16,15 +16,25 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        timeout-minutes: 3
+
+      - name: Check Python
+        timeout-minutes: 1
+        run: |
+          where python
+          python --version
 
       - name: Create virtual environment and install dependencies
+        timeout-minutes: 5
         run: |
           python -m venv .venv
           .venv\Scripts\python -m pip install -r requirements.txt
 
       - name: Fetch live AQI and upload to Databricks
+        timeout-minutes: 10
         env:
           DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          PYTHONUNBUFFERED: "1"
         run: .venv\Scripts\python ingestion\fetch_live_aqi.py
