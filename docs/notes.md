@@ -1,3 +1,42 @@
+# AQI India Data Platform: Project Notes
+
+## Project goal
+Help authorities and citizens anticipate poor air quality days and understand
+what drives them, using reliable, automatically updated pollution data.
+
+## Data sources
+- **Historic:** Kaggle "Air Quality Data in India (2015-2020)" by Vopani (CPCB data)
+  - city_day.csv: daily pollutants and AQI per city
+  - stations.csv: station names, cities, states
+- **Live:** data.gov.in "Real time Air Quality Index from various locations"
+  - Resource ID: 3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69
+  - Publisher: CPCB / Ministry of Environment, Forest and Climate Change
+
+## Platform and tools
+- Databricks Free Edition (catalog: workspace, schema: aqi)
+- SQL and PySpark in Databricks
+- Python 3.13 + VS Code for the live ingestion pipeline
+- GitHub Actions (self-hosted runner) for scheduling
+- Git + GitHub (repo: aqi-india-data-platform)
+
+## Architecture (medallion)
+- **Bronze:** raw data exactly as received (never edited)
+- **Silver:** cleaned, corrected, standardized data
+- **Gold:** star schema, ready for dashboards and models
+
+## Pipeline flow
+```
+Historic: Kaggle CSV -> bronze volume -> bronze tables -> silver -> gold
+
+Live (every 3 hours, GitHub Actions on self-hosted runner "janvi-laptop"):
+data.gov.in API -> fetch (pagination, retries, User-Agent)
+  -> raw JSON saved locally (data/live/)
+  -> upload to /Volumes/workspace/aqi/bronze/live/
+  -> COPY INTO bronze_live_raw (new files only)
+  -> MERGE into silver_live_aqi (new readings only, deduplicated)
+  -> 6 quality checks -> data_quality_results
+  -> run logged -> pipeline_runs (always, even on failure)
+```
 
 ---
 
@@ -234,9 +273,9 @@ on October-November.
 ## Day 3: Live API ingestion
 
 ### API explored
-- One row per station per pollutant; about 3,900 records per snapshot
+- One row per station per pollutant; about 3,900-3,970 records per snapshot
 - Response has metadata (title, org, field list, updated_date) and records
-- Confirmed live: dataset updated on 03/11/2026
+- API updates hourly
 
 ### Live data vs historic data
 | Historic (Kaggle) | Live API |
@@ -252,43 +291,11 @@ on October-November.
 - Date format dd-MM-yyyy HH:mm:ss (historic uses yyyy-MM-dd)
 - Ozone named "OZONE" (historic uses O3)
 - Includes many more cities than our 26 (e.g. Kadapa, Kakinada)
-- Duplicate reading: Sneh Nagar, Nanded (OZONE, 17:00) appeared twice
-  with identical values
-- Time zone: last_update is IST (Indian local time), but Databricks
-  labels it as UTC; values are correct, the label is misleading
+- Duplicate reading: Sneh Nagar, Nanded (OZONE) appeared twice, identical values
+- Stale stations: some stations repeat the same reading across fetches
+- Time zone: last_update is IST, but Databricks labels it UTC
 - Open question: live values may be on a different basis or unit than
   historic daily averages; check documentation before comparing
-
-### Setup done
-- Created virtual environment (venv); used Command Prompt because
-  PowerShell blocks scripts by default
-- Installed requests, python-dotenv, databricks-sdk
-- requirements.txt lists packages for GitHub Actions
-- .env holds DATA_GOV_API_KEY, DATABRICKS_HOST, DATABRICKS_TOKEN
-  (ignored by Git)
-- Databricks personal access token created (90-day lifetime)
-
-### Ingestion script: ingestion/fetch_live_aqi.py
-- Reads secrets from environment (.env locally, GitHub Secrets in the cloud);
-  the same script works in both places with no changes
-- User-Agent header (the server rejected requests that didn't look like
-  a browser, returning 502)
-- Timeout (90 seconds) so it never waits forever
-- Retries: 3 attempts per page with backoff (waits 10s, then 20s)
-- Pagination: fetches 1,000 records per page until all are collected
-- Safe error messages: prints only error type and status code,
-  never the URL (which contains the key)
-- Saves raw JSON with a UTC timestamp in the file name
-  (e.g. aqi_live_20261103_121837.json), plus fetched_at_utc inside the file
-- Uploads the file to /Volumes/workspace/aqi/bronze/live/ with databricks-sdk
-- Exits cleanly with SystemExit(1) on failure (marks the run as failed)
-- First full run: 4 pages, 3,899 of 3,899 records
-
-### Live tables (sql/05_live.sql)
-| Table | Rows (first load) | Description |
-|---|---|---|
-| bronze_live_aqi | 3,899 | Raw records from all JSON files + source_file (lineage) |
-| silver_live_aqi | 3,898 | Cleaned, typed, deduplicated |
 
 ### Live data profile (first snapshot, 03-11-2026 17:00 IST)
 | Pollutant | Readings | % NA |
@@ -302,38 +309,120 @@ on October-November.
 | PM2.5 | 556 | 8.3% |
 - OZONE 558 (one duplicate); PM2.5 556 (one station did not report)
 
-### Silver live cleaning
+### Files
+| File | Purpose |
+|---|---|
+| ingestion/fetch_live_aqi.py | Full pipeline: extract, load, transform, checks, logging |
+| sql/05_live.sql | Step-by-step live bronze/silver build (development) |
+| sql/06_quality.sql | Setup of log tables + monitoring queries |
+| sql/pipeline/01_copy_into_bronze.sql | Incremental bronze load (automated) |
+| sql/pipeline/02_merge_silver.sql | Incremental silver MERGE (automated) |
+| sql/pipeline/03_quality_checks.sql | Quality checks (automated) |
+| .github/workflows/ingest_live_aqi.yml | Schedule: every 3 hours + manual trigger |
+| requirements.txt | requests, python-dotenv, databricks-sdk |
+
+### Live tables
+| Table | Description |
+|---|---|
+| bronze_live_raw | One row per file (records stored as a list), loaded with COPY INTO |
+| silver_live_aqi | One row per reading: cleaned, typed, deduplicated |
+| pipeline_runs | One row per pipeline run (logbook) |
+| data_quality_results | One row per check per run |
+| bronze_live_aqi | Earlier development version (rebuilt from all files) |
+
+### Ingestion script features
+- Secrets read from environment (.env locally, GitHub Secrets in the cloud);
+  the same script works in both places with no changes
+- User-Agent header (server rejected requests that didn't look like a browser)
+- 90-second timeout; 3 retries per page with backoff (10s, then 20s)
+- Pagination: 1,000 records per page until all are collected
+- Safe error messages: error type and status code only, never the URL
+- Raw JSON saved with a UTC timestamp in the file name, plus fetched_at_utc
+- Upload to the bronze volume with databricks-sdk
+- SQL run on the SQL warehouse through the Statement Execution API
+- Code organized into sections: helpers, extract, load, quality, main
+
+### Silver cleaning
 - TO_TIMESTAMP for dates, CAST for coordinates
-- NULLIF + TRY_CAST: "NA" -> NULL, text -> numbers (TRY_CAST avoids crashing
-  on unexpected values)
+- NULLIF + TRY_CAST: "NA" -> NULL, text -> numbers (TRY_CAST avoids crashing)
 - Pollutant names mapped to historic names (PM2.5 -> pm25, OZONE -> o3)
-- Deduplication with QUALIFY ROW_NUMBER(): keeps the latest fetch per
-  station, pollutant, and reading time. Handles exact repeats AND the same
-  reading fetched in two runs (DISTINCT alone would miss the second case)
+- Deduplication: QUALIFY ROW_NUMBER() keeps the latest fetch per
+  station + pollutant + reading time (DISTINCT alone would miss
+  the same reading fetched in two runs)
+
+### Incremental loading
+- **COPY INTO** remembers which files were loaded; only new files are added
+  (tested: 2nd run inserted 0 rows)
+- **MERGE** inserts only readings that don't already exist
+  (match on station + pollutant + reading_time; WHEN NOT MATCHED THEN INSERT)
+- Both are **idempotent**: rerunning gives the same result
+- COPY INTO catches files missed while away (loaded 2 files at once after a gap)
+- First automated run: 7,871 readings inserted from 2 files
+- A run 36 minutes after the previous one inserted 0 readings
+  (API updates hourly; all readings already loaded)
+- Next hourly update: 3,942 new readings inserted, 27 stale repeats skipped
+- Schema lesson: declaring records as ARRAY<MAP> clashed with the real
+  ARRAY<STRUCT>; fixed with a schemaless table + mergeSchema = true
+
+### Data quality checks (on the latest file in silver)
+| Check | Rule | Severity | Why |
+|---|---|---|---|
+| row_count | >= 1000 | critical | Detects incomplete API responses |
+| missing_avg_pct | <= 25% | warning | Detects many stations down |
+| negative_values | = 0 | warning | Pollution can't be negative |
+| unknown_pollutant | = 0 | warning | Detects renamed/new pollutants |
+| duplicate_readings | = 0 | critical | Proves deduplication works (all of silver) |
+| data_age_hours | <= 3 | warning | Freshness (IST/UTC converted correctly) |
+- Critical failure -> run marked failed (exit code 1, red run on GitHub)
+- Warning failure -> success_with_warnings
+- First results: all 6 passed (3,962 rows, 8.73% missing, data 0.83 hours old)
+- Known limitation: checks evaluate the latest file that has readings in silver
+
+### Run logging
+- Each run gets a unique run_id (uuid4), linking pipeline_runs and
+  data_quality_results
+- try / except / finally: the run is ALWAYS logged, even after errors
+- Values passed as SQL parameters (prevents SQL injection, e.g. quotes
+  in error messages)
+- The log already captured: 2 failed runs (CREATE TABLE mix-up in the
+  checks file), 1 interrupted run (no message, manual stop), and
+  successful runs from both the laptop and GitHub Actions
 
 ### Automation: GitHub Actions
-- Workflow: .github/workflows/ingest_live_aqi.yml
-- Schedule: cron "0 */3 * * *" (every 3 hours, UTC); manual trigger
-  enabled with workflow_dispatch
-- Runs on ubuntu-latest, Python 3.13, 20-minute timeout
-- Secrets stored in GitHub Secrets (masked in logs as ***)
-- Status: committed; manual test run pending
+- GitHub cloud runners could NOT connect to the API (ConnectTimeout);
+  the government API blocks cloud IPs
+- Solution: self-hosted runner on the laptop (C:\actions-runner, name
+  "janvi-laptop"); GitHub still schedules, logs, and stores secrets
+- Trade-off: runs only happen while the laptop is on and the runner is running;
+  missed runs are skipped, the next run catches up
+- shell: cmd (avoids PowerShell script restrictions); fresh venv each run
+- Per-step timeouts so a stuck step fails fast at the exact step
+- PYTHONUNBUFFERED=1 so logs appear live
+- Secrets: DATA_GOV_API_KEY, DATABRICKS_HOST, DATABRICKS_TOKEN,
+  DATABRICKS_WAREHOUSE_ID (GitHub Secrets, masked in logs)
+- Schedule: cron "0 */3 * * *" (every 3 hours, UTC) + workflow_dispatch
+- "Abandoned" run: laptop slept during a job; harmless (idempotent pipeline)
+- First full automated run on GitHub: success in 1m 19s
 
-### Issues encountered
-- ReadTimeout: server took more than 30 seconds -> increased timeout,
-  added retries
-- 502 Bad Gateway: fixed by adding a User-Agent header
-- SECURITY: an error message printed the full URL including the API key
-  -> changed error handling to never print URLs. The site shows the same
-  key and offers no regeneration; risk is low (public data only)
-- ModuleNotFoundError: databricks-sdk installed outside venv
-  -> reinstalled with (venv) active
+### Issues encountered and fixes
+| Issue | Cause | Fix |
+|---|---|---|
+| ReadTimeout | Slow API | 90s timeout + retries with backoff |
+| 502 Bad Gateway | Server rejected non-browser requests | User-Agent header |
+| API key in error output | Error printed full URL | Never print URLs; status code only |
+| PowerShell blocked venv | Execution policy | Used Command Prompt |
+| ModuleNotFoundError | Package installed outside venv | Reinstalled with (venv) active |
+| requirements.txt missing on GitHub | *.txt in .gitignore | Added !requirements.txt |
+| ConnectTimeout on GitHub | API blocks cloud IPs | Self-hosted runner |
+| Job waiting 24 min | Runner not started | Start run.cmd before triggering |
+| COPY INTO type error | Hand-declared schema didn't match | Schemaless table + mergeSchema |
+| CREATE in checks file | Whole tab pasted into pipeline file | One statement per pipeline file |
 
-### Insight
-- India's monitoring network has grown a lot: 26 cities in the 2015-2020
-  data vs 289 cities and 557 stations in today's live feed
-- Live data is also more complete: PM2.5 missing 8% (vs 16% historically),
-  PM10 missing 9% (vs 38% historically)
+### Insights
+- Monitoring network grew from 26 cities (2015-2020) to 289 cities, 557 stations
+- Live data is more complete: PM2.5 missing ~8.7% (vs 16% historically),
+  PM10 ~9% (vs 38%)
+- Live data is fresh: newest reading under 1 hour old at fetch time
 
 ---
 
@@ -350,36 +439,40 @@ on October-November.
 ---
 
 ## Skills used
-- **SQL:** CREATE SCHEMA/VOLUME/TABLE, read_files (CSV and JSON), COUNT,
-  DISTINCT, MIN/MAX, GROUP BY, ORDER BY, WHERE, CASE WHEN, ALTER TABLE
-  (ADD COLUMN, RENAME), UPDATE, DESCRIBE HISTORY, VERSION AS OF,
-  LEFT/INNER JOIN, aliases, subqueries, CTEs, window functions
-  (ROW_NUMBER, RANK, LAG), PARTITION BY, QUALIFY, conditional aggregation,
-  HAVING, BETWEEN, IN, SEQUENCE + EXPLODE, CAST, TRY_CAST, NULLIF,
-  TO_TIMESTAMP, DATE_FORMAT, DAYOFWEEK, VALUES, ROUND, _metadata
+- **SQL:** CREATE SCHEMA/VOLUME/TABLE (incl. IF NOT EXISTS, schemaless),
+  read_files (CSV and JSON), COPY INTO, MERGE, LATERAL VIEW EXPLODE,
+  QUALIFY, UNION ALL, COUNT, DISTINCT, MIN/MAX, GROUP BY, ORDER BY, WHERE,
+  CASE WHEN, ALTER TABLE (ADD COLUMN, RENAME), UPDATE, DESCRIBE HISTORY,
+  VERSION AS OF, LEFT/INNER JOIN, aliases, subqueries, CTEs, window functions
+  (ROW_NUMBER, RANK, LAG), PARTITION BY, conditional aggregation, HAVING,
+  BETWEEN, IN, SEQUENCE + EXPLODE, CAST, TRY_CAST, NULLIF, TO_TIMESTAMP,
+  FROM_UTC_TIMESTAMP, UNIX_TIMESTAMP, DATE_FORMAT, DAYOFWEEK, VALUES,
+  ROUND, _metadata, SHOW TABLES, named parameters
 - **PySpark:** spark.table, filter, select, alias, withColumn,
   when/otherwise, isin, year, month, groupBy, partitionBy,
   saveAsTable, exceptAll
 - **Python:** requests (params, headers, timeout), python-dotenv,
-  os.getenv, os.path, functions, docstrings, dictionaries, while/for loops,
-  try/except, f-strings, time.sleep, datetime (UTC), json, file handling,
-  databricks-sdk (WorkspaceClient, files.upload), SystemExit,
+  os.getenv, os.path, functions, docstrings, dictionaries, lists,
+  while/for loops, try/except/finally, f-strings, time.sleep,
+  datetime (UTC), uuid, json, file handling, databricks-sdk
+  (WorkspaceClient, files.upload, statement_execution), SystemExit,
   if __name__ == "__main__"
-- **DevOps:** virtual environments, requirements.txt, .gitignore,
-  GitHub Secrets, GitHub Actions (YAML, cron, workflow_dispatch)
+- **DevOps:** virtual environments, requirements.txt, .gitignore
+  (incl. ! exceptions), GitHub Secrets, GitHub Actions (YAML, cron,
+  workflow_dispatch, self-hosted runner, per-step timeouts)
 - **Concepts:** medallion architecture, Delta tables, time travel,
-  data profiling, data quality checks, partitioning, star schema,
-  fact vs dimension tables, surrogate keys, fair comparisons,
+  data profiling, data quality checks (critical vs warning), partitioning,
+  star schema, fact vs dimension tables, surrogate keys, fair comparisons,
   validating results before trusting them, retries with backoff,
   pagination, secret management, data lineage, deduplication,
-  time zone handling
+  incremental loading, idempotency, ELT, time zone handling,
+  pipeline monitoring, SQL injection prevention
 
 ---
 
 ## Next steps
-1. Test the GitHub Actions workflow manually (Run workflow)
-2. Confirm scheduled runs add new files every 3 hours
-3. Incremental load with MERGE (live data into a gold table)
-4. Aggregate live station readings to city level
-5. Data quality framework + pipeline_runs log
-6. Remaining analysis queries + statistics (Day 4)
+1. Live gold layer: aggregate station readings to city level
+2. Remaining analysis queries + statistics (Day 4)
+3. Forecast model + SHAP (Day 5)
+4. Power BI + Streamlit (Day 6)
+5. Testing + documentation (Day 7)
