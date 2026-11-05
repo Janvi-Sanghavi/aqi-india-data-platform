@@ -30,11 +30,12 @@ jobs:
           python -m venv .venv
           .venv\Scripts\python -m pip install -r requirements.txt
 
-      - name: Fetch live AQI and upload to Databricks
+      - name: Run AQI pipeline (fetch, upload, bronze, silver)
         timeout-minutes: 10
         env:
           DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_WAREHOUSE_ID }}
           PYTHONUNBUFFERED: "1"
         run: .venv\Scripts\python ingestion\fetch_live_aqi.py
