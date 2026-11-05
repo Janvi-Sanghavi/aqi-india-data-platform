@@ -1,9 +1,8 @@
-
--- Step 3: Data quality checks on the latest file loaded into silver
+-- Data quality checks on the latest reading hour in silver
 WITH latest AS (
   SELECT *
   FROM workspace.aqi.silver_live_aqi
-  WHERE source_file = (SELECT MAX(source_file) FROM workspace.aqi.silver_live_aqi)
+  WHERE reading_time = (SELECT MAX(reading_time) FROM workspace.aqi.silver_live_aqi)
 )
 SELECT 'row_count' AS check_name,
        CAST(COUNT(*) AS DOUBLE) AS check_value,
@@ -57,4 +56,4 @@ SELECT 'data_age_hours',
        (UNIX_TIMESTAMP(FROM_UTC_TIMESTAMP(MAX(fetched_at_utc), 'Asia/Kolkata'))
         - UNIX_TIMESTAMP(MAX(reading_time))) / 3600.0 <= 3,
        'warning'
-FROM latest;
+FROM latest

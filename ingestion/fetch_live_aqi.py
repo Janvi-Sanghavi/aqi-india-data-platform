@@ -25,6 +25,7 @@ SQL_DIR = os.path.join("sql", "pipeline")
 COPY_SQL = os.path.join(SQL_DIR, "01_copy_into_bronze.sql")
 MERGE_SQL = os.path.join(SQL_DIR, "02_merge_silver.sql")
 QUALITY_SQL = os.path.join(SQL_DIR, "03_quality_checks.sql")
+GOLD_SQL = os.path.join(SQL_DIR, "04_gold_live_city_hourly.sql")
 
 
 # ---------- Helpers ----------
@@ -233,6 +234,11 @@ def main():
         merge_result = run_sql(client, read_sql_file(MERGE_SQL))
         run["readings_inserted"] = int(merge_result[0]["num_inserted_rows"]) if merge_result else 0
         print(f"  Readings inserted: {run['readings_inserted']}")
+
+        
+        print("Building live gold table...")
+        run_sql(client, read_sql_file(GOLD_SQL))
+        print("  Gold table refreshed.")
 
         # 4. Quality checks
         checks = run_quality_checks(client, run["run_id"])
