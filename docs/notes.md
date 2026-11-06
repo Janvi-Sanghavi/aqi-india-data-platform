@@ -589,6 +589,91 @@ percentage change, ratios
 
 ---
 
+## Day 5: Forecast model (notebook/09_forecast, pandas + scikit-learn + XGBoost + SHAP)
+
+### Goal
+Predict tomorrow's AQI for Delhi, and prove the model beats simple guesses.
+
+### Data preparation
+- Delhi only (most complete data: 0.5% AQI missing; biggest need for warnings)
+- No AQI filter: Delhi's values above 500 are real (Query 10)
+- `asfreq("D")` restores missing dates as empty rows, so "yesterday" always
+  means the actual previous day (same lesson as ROWS vs RANGE)
+- 2,009 days (2015-01-01 to 2020-07-01); 1,969 rows usable after features
+
+### Target and features
+- Target: tomorrow's AQI (`shift(-1)`)
+- Features (only today or earlier, to avoid data leakage):
+  aqi_today, aqi_lag1, aqi_lag2, aqi_lag7, aqi_roll7 (7-day mean),
+  aqi_roll7_std (volatility), pm25_today, pm10_today, month, day_of_year
+- Checked shift directions by eye with real rows (target looks forward,
+  lags look backward)
+
+### Time-based split (never shuffle time series)
+- Train: 2015-01-08 to 2018-12-31 (1,422 rows)
+- Test: 2019 (365 rows)
+- 2020 excluded from testing (lockdown makes it unusual)
+- Random split would leak the future into training
+
+### Results (2019 test year)
+| Model | MAE | RMSE |
+|---|---|---|
+| Baseline: tomorrow = today | 38.6 | 54.1 |
+| Baseline: tomorrow = 7-day average | 56.2 | 75.9 |
+| **XGBoost** | **32.1** | **44.2** |
+- XGBoost: about 17% lower MAE and 18% lower RMSE than the best baseline
+- "Tomorrow = today" is a strong baseline (pollution changes slowly)
+- 7-day average baseline is worse: it reacts slowly to rising pollution
+  (useful as a feature, not as the prediction)
+- Bigger RMSE gain suggests the model is especially better on big changes
+- XGBoost settings: 300 trees, max_depth 4, learning_rate 0.05,
+  subsample 0.8, colsample_bytree 0.8, random_state 42 (reproducible)
+- Limitation: no weather data (wind, rain, temperature); adding it would
+  likely improve forecasts further
+
+### Early-warning evaluation (AQI > 200 = Poor or worse)
+| Model | Poor days | Caught | Missed | False alarms | Recall | Precision |
+|---|---|---|---|---|---|---|
+| Baseline | 194 | 164 | 30 | 30 | 84.5% | 84.5% |
+| **XGBoost** | 194 | **187** | **7** | 39 | **96.4%** | 82.7% |
+- Missed warnings dropped 77% (30 -> 7); recall 84.5% -> 96.4%
+- Trade-off: 9 more false alarms (precision 84.5% -> 82.7%); favorable for
+  public health (a missed dangerous day costs more than an extra warning)
+- MAE improved 17%, but missed warnings improved 77%: measure models the way
+  they will actually be used
+
+### Explainability (SHAP, mean absolute effect in AQI points)
+| Feature | Effect |
+|---|---|
+| pm25_today | 46.9 |
+| aqi_today | 34.3 |
+| pm10_today | 15.1 |
+| aqi_roll7 | 7.8 |
+| aqi_lag2 | 3.7 |
+| day_of_year | 3.6 |
+| aqi_lag1 | 3.5 |
+| aqi_roll7_std | 3.0 |
+| aqi_lag7 | 3.0 |
+| month | 1.2 |
+- Today's PM2.5 is the single most important predictor
+- PM2.5 + PM10 explain about half of the model's total effect
+- Third independent confirmation that particulates drive AQI:
+  SQL (Query 7), statistics (correlation), ML (SHAP)
+- Older lags add little: most useful information is in today's readings
+- Season features matter less than expected because today's pollution
+  already reflects the season
+
+### Output
+- Table `workspace.aqi.gold_forecast_delhi_2019` (365 rows): date, city,
+  actual_aqi_tomorrow, baseline_pred, xgb_pred (for Power BI and Streamlit)
+
+### Resume line
+"Built an XGBoost next-day AQI forecast for Delhi that reduced missed
+Poor-air warnings by 77% (30 -> 7) compared with a naive baseline,
+catching 96% of unhealthy days in 2019."
+
+---
+
 ## Key insights so far (summary)
 1. About 26% of recorded days were Poor or worse; only 5% were Good
 2. Delhi's average AQI fell 25% from 2015 to 2019, improving every year
@@ -603,9 +688,13 @@ percentage change, ratios
    pushes Delhi into Severe (403)
 8. Monitoring coverage grew from 26 cities to 295 cities (557 stations);
    live data (Nov 2026) confirms the November pattern (Delhi PM2.5 ~369)
-9. Data reliability matters: Ahmedabad's sensor errors, Mumbai's missing
-   years, and an over-broad filter would all have produced wrong conclusions
-   without checks
+9. XGBoost next-day forecast for Delhi caught 96% of Poor-or-worse days in
+   2019 and cut missed warnings by 77% vs a naive baseline
+10. Today's PM2.5 is the top forecast driver (SHAP), confirmed by SQL,
+    statistics, and ML
+11. Data reliability matters: Ahmedabad's sensor errors, Mumbai's missing
+    years, and an over-broad filter would all have produced wrong conclusions
+    without checks
 
 ---
 
@@ -624,7 +713,11 @@ percentage change, ratios
   withColumn, when/otherwise, isin, year, month, groupBy, partitionBy,
   saveAsTable, exceptAll
 - **pandas / SciPy:** describe, corr (Spearman), quantile, boolean filtering,
-  groupby, pivot_table, apply, lambda, dropna, Wilcoxon signed-rank test
+  groupby, pivot_table, apply, lambda, dropna, Wilcoxon signed-rank test,
+  to_datetime, set_index, asfreq, shift, rolling
+- **Machine learning:** feature engineering (lags, rolling stats, calendar),
+  data leakage prevention, time-based split, baselines, XGBoost, MAE/RMSE,
+  recall/precision, SHAP explainability, reproducibility (random_state)
 - **Python:** requests (params, headers, timeout), python-dotenv,
   os.getenv, os.path, functions, docstrings, dictionaries, lists,
   while/for loops, try/except/finally, f-strings, time.sleep,
@@ -648,6 +741,8 @@ percentage change, ratios
 ---
 
 ## Next steps
-1. Forecast model + SHAP (Day 5)
-2. Power BI + Streamlit (Day 6)
-3. Testing + documentation (Day 7)
+1. Power BI dashboard (Day 6)
+2. Streamlit app with live AQI, forecast, AI summary, pipeline health (Day 6)
+3. Testing + documentation: README, architecture diagram, runbook (Day 7)
+4. Optional: rerun Queries 2, 3, 8 with the corrected filter;
+   test the forecast on other cities and on 2020
