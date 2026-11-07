@@ -674,6 +674,93 @@ catching 96% of unhealthy days in 2019."
 
 ---
 
+## Day 6: Power BI dashboard (powerbi/aqi_india_dashboard.pbix)
+
+### Connection
+- Power BI Desktop -> Databricks connector
+- Server hostname + HTTP path from the SQL warehouse's connection details
+- Authentication: Databricks personal access token ("Account key" field)
+- Import mode (fast; doesn't keep the SQL warehouse running on every click)
+- Tables loaded: fact_aqi_daily, dim_city, dim_date, dim_pollutant,
+  gold_forecast_delhi_2019, gold_live_city_hourly, pipeline_runs
+- Plus shap_importance (entered manually with Enter data)
+
+### Data model (star schema in Power BI)
+- fact_aqi_daily[city_id] -> dim_city[city_id] (many-to-one, single)
+- fact_aqi_daily[date_id] -> dim_date[date_id] (many-to-one, single)
+- gold_forecast_delhi_2019[city] -> dim_city[city] (auto-detected, kept)
+- dim_date: month_name sorted by month; season sorted by season_order
+  (conditional column added in Power Query: Winter 1, Summer 2,
+  Monsoon 3, Post-Monsoon 4)
+
+### DAX measures
+| Measure | Logic |
+|---|---|
+| Avg AQI | AVERAGEX + FILTER with RELATED; excludes only Ahmedabad's flagged values (same corrected filter as SQL) |
+| Poor Days % | VAR/RETURN; share of valid days in Poor, Very Poor, Severe |
+| Avg PM2.5 | AVERAGE of pm25 |
+| PM2.5 Above Limit % | DIVIDE: days with pm25 > 60 / days with pm25 measured |
+| MAE XGBoost / MAE Baseline | AVERAGEX of ABS(actual - prediction) |
+| Error Reduction % | DIVIDE(MAE Baseline - MAE XGBoost, MAE Baseline) |
+| Recall XGBoost | Poor days warned / all Poor days |
+| Missed XGBoost / Missed Baseline | Poor days with no warning |
+- Power BI results match Python exactly (MAE 32.1 vs 38.6, recall 96.4%,
+  missed 7 vs 30): a cross-check between Python and DAX
+
+### Theme and design
+- Custom theme (aqi_theme.json): light grey page, white rounded cards,
+  soft shadows, navy accents
+- India's official CPCB AQI colors for category-based formatting
+- Insight-style titles (the finding, not just the metric)
+- Honest charts: Y-axis from 0, empty cells left blank (not shown as zero)
+
+### Page 1: Overview ("Air Quality Across 26 Indian Cities, 2015-2020")
+- KPI cards: Avg AQI 156, PM2.5 above limit 39.2%, Avg PM2.5 67,
+  Poor days 24.7%
+- "Which cities breathe unsafe air most often?": % of days PM2.5 above the
+  limit by city, colored by share (red = more than half of days).
+  Top: Gurugram 73.0%, Delhi 72.8%, Patna 68.1%, Lucknow 67.0%
+- "Air is twice as polluted in November as in July": monthly AQI line
+  (Nov 221 vs Jul 106)
+- Slicers: Year, Region
+- Design decision: switched the city chart from Avg AQI to PM2.5 Above
+  Limit %, because Ahmedabad's CO error inflated its AQI ranking;
+  bar colors based on the shown value (not AQI) to avoid misleading colors
+
+### Page 2: Pollution Patterns ("Seasons, Cities, and Trends (2015-2020)")
+- Heatmap (matrix): Avg PM2.5 by city x month; gradient green -> yellow
+  (60 = safe limit) -> dark red; empty values left blank so "no data"
+  doesn't look like clean air
+  - Delhi Nov 232, Gurugram Nov 194, Patna Jan ~220, Lucknow Nov-Dec ~210
+  - Every city turns green Jun-Sep (monsoon)
+- "Winter is worst in every region": region x season columns
+  (West and Northeast flagged as less reliable)
+- "Delhi and Hyderabad improved every year; Lucknow did not": yearly trend,
+  5 reliable cities, 2015-2019 (visual-level filters); labels only on
+  Delhi and Lucknow to avoid overlap
+- Slicer: City
+
+### Page 3: Forecast ("Can We Warn Delhi Before Bad Air Days?")
+- KPI cards: avg error 32.1, smaller error vs naive 16.8%,
+  Poor days warned 96.4%, Poor days missed 7
+- "The forecast closely follows actual AQI through 2019": daily actual vs
+  XGBoost forecast, with a dashed constant line at 200 (Poor threshold)
+  - Model slightly underestimates the most extreme spikes (Nov peak ~660),
+    but still crosses the threshold, so the warning still works
+- "Missed warnings cut from 30 to 7": baseline vs XGBoost
+- "Today's PM2.5 drives the forecast most": SHAP importance bar chart
+
+### Power BI lessons
+- Date fields become a hierarchy automatically (Year/Quarter/Month/Day);
+  choose the plain date field for daily charts (or turn off Auto date/time)
+- Conditional formatting ranges must use "Number", not "Percent"
+- DAX text uses double quotes ("Ahmedabad"); single quotes are table names
+- New card visuals take number formats from the measure (Measure tools)
+- Sort-by-column fixes alphabetical ordering of months and seasons
+- Empty values must not be formatted "as zero" in heatmaps
+
+---
+
 ## Key insights so far (summary)
 1. About 26% of recorded days were Poor or worse; only 5% were Good
 2. Delhi's average AQI fell 25% from 2015 to 2019, improving every year
@@ -724,6 +811,12 @@ catching 96% of unhealthy days in 2019."
   datetime (UTC), uuid, json, file handling, databricks-sdk
   (WorkspaceClient, files.upload, statement_execution), SystemExit,
   if __name__ == "__main__"
+- **Power BI:** Databricks connector (Import mode), relationships
+  (many-to-one), DAX measures (AVERAGEX, FILTER, RELATED, VAR/RETURN,
+  DIVIDE, COUNTROWS, ISBLANK, IN), Power Query conditional columns,
+  sort by column, conditional formatting (rules and gradients), custom
+  JSON theme, matrix heatmap, constant lines, visual-level filters,
+  Enter data
 - **DevOps:** virtual environments, requirements.txt, .gitignore
   (incl. ! exceptions), GitHub Secrets, GitHub Actions (YAML, cron,
   workflow_dispatch, self-hosted runner, per-step timeouts)
@@ -741,8 +834,8 @@ catching 96% of unhealthy days in 2019."
 ---
 
 ## Next steps
-1. Power BI dashboard (Day 6)
-2. Streamlit app with live AQI, forecast, AI summary, pipeline health (Day 6)
-3. Testing + documentation: README, architecture diagram, runbook (Day 7)
+1. Streamlit app with live AQI, forecast, AI summary, pipeline health (Day 6)
+2. Testing + documentation: README, architecture diagram, runbook (Day 7)
+3. Clean-up: drop leftover dim_table in Databricks
 4. Optional: rerun Queries 2, 3, 8 with the corrected filter;
    test the forecast on other cities and on 2020
