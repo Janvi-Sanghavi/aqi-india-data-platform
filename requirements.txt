@@ -1,3 +1,7 @@
 requests
 python-dotenv
 databricks-sdk
+streamlit
+databricks-sql-connector
+plotly
+google-genai

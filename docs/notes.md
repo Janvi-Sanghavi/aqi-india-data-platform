@@ -398,7 +398,7 @@ percentage change, ratios
 | sql/pipeline/03_quality_checks.sql | Quality checks (automated) |
 | sql/pipeline/04_gold_live_city_hourly.sql | Live gold rebuild (automated) |
 | .github/workflows/ingest_live_aqi.yml | Schedule: every 3 hours + manual trigger |
-| requirements.txt | requests, python-dotenv, databricks-sdk |
+| requirements.txt | requests, python-dotenv, databricks-sdk, streamlit, databricks-sql-connector, plotly, google-genai |
 - Rule: each file in sql/pipeline/ holds exactly ONE statement
   (the API runs one statement at a time)
 
@@ -761,6 +761,90 @@ catching 96% of unhealthy days in 2019."
 
 ---
 
+## Day 6: Streamlit app (app/app.py)
+
+### Goal
+A public web app that a non-technical person can understand in seconds:
+"How clean is the air in my city, what should I do, and can I trust it?"
+
+### Setup
+- Packages (in the venv): streamlit, databricks-sql-connector, plotly, google-genai
+- Secrets in .streamlit/secrets.toml (ignored by Git): DATABRICKS_HOST
+  (no https://), DATABRICKS_HTTP_PATH, DATABRICKS_TOKEN, GEMINI_API_KEY,
+  GEMINI_MODEL
+- Theme in .streamlit/config.toml (light, navy accents; safe to commit)
+- Run with: `python -m streamlit run app/app.py` (guarantees the venv's Python)
+
+### App structure (plain-language tabs)
+| Tab | Shows |
+|---|---|
+| 📰 Today's air in brief (top) | AI-written 4-5 sentence summary of today's data |
+| 🏙️ My city today | Big colored status card (CPCB category, "x times the safe limit"), "What should I do?" health advice, gauge, city trend |
+| 🗺️ Compare cities | "61 of 66 cities unsafe", most polluted / cleanest, top-15 chart in CPCB colors, cities per category |
+| 🔮 Can we warn in advance? | "Warned about 187 of 194 unhealthy days", forecast vs actual with shaded unhealthy zone, explanation in plain words |
+| ✅ Can I trust this data? | Last update, result, success rate since go-live, 6 checks in plain names, known limitations |
+| Glossary | PM2.5, µg/m³, safe limit, AQI, monitoring station |
+
+### Design for non-technical users
+- Questions as tab names; "fine dust (PM2.5)" instead of jargon
+- Official CPCB PM2.5 bands and colors (Good 0-30 ... Severe 250+)
+- Health advice per level, paraphrased from CPCB's health guidance
+- Metrics rephrased: recall 96.4% -> "warned about 187 of 194 unhealthy days"
+- Check names rephrased: row_count -> "Enough readings arrived"
+- Honesty built in: single-station warning, known limitations, AI label
+- Cities with 1 station excluded from rankings (2+ stations filter), because
+  single sensors (e.g. Mandi Gobindgarh 389) are less reliable than averages
+  (e.g. Delhi, 59 stations)
+
+### Technical details
+- @st.cache_resource: ONE reused Databricks connection (with automatic
+  reconnect + retry if it times out)
+- @st.cache_data(ttl=1800): query results cached 30 min (fast, keeps the
+  warehouse from waking on every click)
+- Named SQL parameters (:city, :run_id) prevent SQL injection
+- Time handling: live reading times are IST with a UTC label (label dropped);
+  pipeline run times are real UTC (converted to Asia/Kolkata)
+- Success rate counts only runs since go-live (6 Nov), excluding setup tests
+- Bigger chart fonts via a custom Plotly template
+
+### AI briefing (Google Gemini)
+- Grounded generation: the app computes the facts first (build_facts), and
+  the prompt says "use ONLY these facts; no new numbers, causes, or
+  predictions" (prevents hallucination)
+- Verified: briefing numbers matched the data exactly
+  (61 of 66 cities above the limit; Ghaziabad 369; Srinagar 40)
+- Cached 3 hours per reading time: Gemini called at most once per data update
+- Page loads first, briefing filled in last (st.empty placeholder), so a
+  slow model never blocks the page
+- Failures show a friendly message to users; technical details are logged
+  to the terminal ([briefing error] ...)
+- Model name read from secrets (GEMINI_MODEL) so it can change without code
+  changes; default gemini-3.5-flash-lite (faster)
+- Labeled as AI-generated, with a pointer to the charts for exact values
+
+### Issues encountered and fixes
+| Issue | Cause | Fix |
+|---|---|---|
+| PowerShell blocked venv activation | Execution policy | Command Prompt as default terminal profile |
+| Title cut off at top | CSS padding too small | padding-top 3.5rem |
+| TOML parse error (line 4) | Gemini key missing quotes | Text values in double quotes |
+| Briefing silently missing | App started before secrets were fixed | Restart app; show a note when no key |
+| ImportError: genai | google-genai not in venv | pip install in venv |
+| No module named streamlit (venv) | Streamlit installed in main Python, not venv | Install all app packages in venv; use python -m streamlit |
+| 404 model not available | gemini-2.5-flash retired for new users | Configurable model name; listed available models via the API |
+| Slow loading | New connection per query; page waited for Gemini; warehouse cold start | Reused connection, page-first rendering, caching |
+| One-line model list failed | Client closed before lazy list finished | Small script keeping the client in a variable |
+
+### Live insights (9 Nov 2026, 12 AM IST)
+- 274 cities and 550 stations reporting
+- 62 of 66 cities (2+ stations) above the PM2.5 safe limit
+- Only 5 cities "Good"; 138 "Very Poor"; 43 "Severe"
+- Most polluted: Ghaziabad, Delhi, Noida, Gwalior, Bhiwadi (North India)
+- Cleanest: Srinagar, Thiruvananthapuram, Vrindavan
+- Delhi: Severe, 362 µg/m³ (6x the safe limit), average of 59 stations
+
+---
+
 ## Key insights so far (summary)
 1. About 26% of recorded days were Poor or worse; only 5% were Good
 2. Delhi's average AQI fell 25% from 2015 to 2019, improving every year
@@ -779,7 +863,9 @@ catching 96% of unhealthy days in 2019."
    2019 and cut missed warnings by 77% vs a naive baseline
 10. Today's PM2.5 is the top forecast driver (SHAP), confirmed by SQL,
     statistics, and ML
-11. Data reliability matters: Ahmedabad's sensor errors, Mumbai's missing
+11. Live (9 Nov 2026): 62 of 66 cities above the PM2.5 safe limit; only 5
+    cities "Good"; the worst cities are all in North India
+12. Data reliability matters: Ahmedabad's sensor errors, Mumbai's missing
     years, and an over-broad filter would all have produced wrong conclusions
     without checks
 
@@ -817,6 +903,13 @@ catching 96% of unhealthy days in 2019."
   sort by column, conditional formatting (rules and gradients), custom
   JSON theme, matrix heatmap, constant lines, visual-level filters,
   Enter data
+- **Streamlit / web app:** st.tabs, columns, metrics, containers, custom
+  CSS, st.secrets, st.cache_data vs st.cache_resource, st.empty placeholders,
+  Plotly (bar, line, gauge, shaded regions, custom template),
+  databricks-sql-connector with named parameters
+- **Generative AI:** Gemini API (google-genai), grounded prompts,
+  hallucination prevention, caching LLM calls, graceful failure,
+  configurable model names, AI labeling
 - **DevOps:** virtual environments, requirements.txt, .gitignore
   (incl. ! exceptions), GitHub Secrets, GitHub Actions (YAML, cron,
   workflow_dispatch, self-hosted runner, per-step timeouts)
@@ -834,8 +927,8 @@ catching 96% of unhealthy days in 2019."
 ---
 
 ## Next steps
-1. Streamlit app with live AQI, forecast, AI summary, pipeline health (Day 6)
+1. Deploy the Streamlit app to Streamlit Community Cloud (public link)
 2. Testing + documentation: README, architecture diagram, runbook (Day 7)
-3. Clean-up: drop leftover dim_table in Databricks
+3. Clean-up: drop leftover dim_table in Databricks; delete list_models.py
 4. Optional: rerun Queries 2, 3, 8 with the corrected filter;
    test the forecast on other cities and on 2020

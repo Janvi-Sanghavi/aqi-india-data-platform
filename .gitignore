@@ -2,6 +2,7 @@
 *.txt
 !requirements.txt
 .env
+.streamlit/secrets.toml
 
 # Data files
 *.csv
