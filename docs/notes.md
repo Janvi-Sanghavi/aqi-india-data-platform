@@ -845,6 +845,45 @@ A public web app that a non-technical person can understand in seconds:
 
 ---
 
+## Day 7: Deployment and documentation
+
+### Deployment (Streamlit Community Cloud)
+- Live app: https://aqi-india-platform.streamlit.app/
+- Deployed from GitHub: repo Janvi-Sanghavi/aqi-india-data-platform,
+  branch main, main file app/app.py, Python 3.13
+- Streamlit Cloud needed permission to read PRIVATE repos
+  (Settings -> Source control -> Connect here -> Authorize); organization
+  access (buildflow-deployments) was NOT granted (not needed)
+- Subdomain "india-air-quality" was taken; chose "aqi-india-platform"
+- Secrets pasted into Advanced settings -> Secrets (same contents as
+  local .streamlit/secrets.toml); GitHub Secrets are NOT shared with
+  Streamlit, and secrets.toml is not on GitHub
+- Databricks accepts connections from cloud servers (unlike the
+  government API), so the deployed app reads the tables directly
+- Auto-redeploys on every push to main
+- Free apps sleep when unused; first visitor waits about a minute
+
+### Where secrets live
+| Location | Used by |
+|---|---|
+| .env | Pipeline on the laptop |
+| GitHub Secrets | GitHub Actions (scheduled pipeline) |
+| .streamlit/secrets.toml | App on the laptop |
+| Streamlit Cloud secrets | Deployed app |
+- Databricks token expires after 90 days: renew in ALL four places
+
+### Documentation
+- README.md (project root): badges, live app link, overview, key results,
+  Mermaid architecture diagram (GitHub renders it automatically), features,
+  data quality section (6 checks + 4 issues found and fixed), tech stack,
+  repository structure, getting started, data sources, limitations
+- docs/runbook.md: setup, running the pipeline and app, scheduled runs,
+  monitoring query, common problems table, token renewal, adding checks
+- Runbook purpose: the pipeline runs unattended, so anyone (including
+  future me) must be able to start, monitor, and fix it
+
+---
+
 ## Key insights so far (summary)
 1. About 26% of recorded days were Poor or worse; only 5% were Good
 2. Delhi's average AQI fell 25% from 2015 to 2019, improving every year
@@ -910,6 +949,9 @@ A public web app that a non-technical person can understand in seconds:
 - **Generative AI:** Gemini API (google-genai), grounded prompts,
   hallucination prevention, caching LLM calls, graceful failure,
   configurable model names, AI labeling
+- **Deployment & docs:** Streamlit Community Cloud (GitHub-based deploy,
+  private repo access, cloud secrets), README with Mermaid diagram,
+  operations runbook
 - **DevOps:** virtual environments, requirements.txt, .gitignore
   (incl. ! exceptions), GitHub Secrets, GitHub Actions (YAML, cron,
   workflow_dispatch, self-hosted runner, per-step timeouts)
@@ -926,9 +968,24 @@ A public web app that a non-technical person can understand in seconds:
 
 ---
 
-## Next steps
-1. Deploy the Streamlit app to Streamlit Community Cloud (public link)
-2. Testing + documentation: README, architecture diagram, runbook (Day 7)
-3. Clean-up: drop leftover dim_table in Databricks; delete list_models.py
+## Project status: COMPLETE
+
+### Done
+- Notebooks exported (02_silver_pyspark, 08_statistics, 09_forecast) into notebook/
+- Clean-up: leftover dim_table dropped in Databricks; list_models.py deleted
+- Final commit and push; README diagram renders on GitHub; app link added
+  to the repo's About -> Website
+- App confirmed public (anyone with the link) in an incognito window
+
+### Ongoing maintenance
+- Start the self-hosted runner when working, so live data stays fresh
+- Renew the Databricks token before 90 days (in all four places)
+- Update GEMINI_MODEL if Google retires the current model
+
+### Optional future improvements
+- Rerun Queries 2, 3, 8 with the corrected Ahmedabad filter
+- Add weather data (wind, rain, temperature) to the forecast
+- Test the forecast on other cities and on 2020
+- Move ingestion to an always-on host so runs don't depend on the laptop
 4. Optional: rerun Queries 2, 3, 8 with the corrected filter;
    test the forecast on other cities and on 2020
