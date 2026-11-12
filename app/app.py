@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -77,12 +78,25 @@ h1, h2, h3 {color: #1F3A5F;}
 # ---------- Data access ----------
 @st.cache_resource(show_spinner=False)
 def get_connection():
-    """Open ONE Databricks connection and reuse it for every query (much faster)."""
-    return sql.connect(
-        server_hostname=st.secrets["DATABRICKS_HOST"],
-        http_path=st.secrets["DATABRICKS_HTTP_PATH"],
-        access_token=st.secrets["DATABRICKS_TOKEN"],
-    )
+    """Open ONE Databricks connection and reuse it for every query (much faster).
+
+    Retries patiently because a sleeping serverless warehouse can take a minute or two
+    to start after a quiet period.
+    """
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            return sql.connect(
+                server_hostname=st.secrets["DATABRICKS_HOST"],
+                http_path=st.secrets["DATABRICKS_HTTP_PATH"],
+                access_token=st.secrets["DATABRICKS_TOKEN"],
+                _retry_stop_after_attempts_duration=180,  # wait up to 3 minutes per attempt
+            )
+        except Exception as error:
+            last_error = error
+            print(f"[connection error] attempt {attempt}: {type(error).__name__}: {str(error)[:300]}")
+            time.sleep(10 * attempt)
+    raise last_error
 
 
 def _fetch(query, params):
@@ -182,11 +196,24 @@ def info_box(label, big, note=""):
 
 
 # ---------- Load live data ----------
-live = run_query("""
-    SELECT city, state, reading_time, stations_reporting, pm25, pm10
-    FROM workspace.aqi.gold_live_city_hourly
-    WHERE reading_time = (SELECT MAX(reading_time) FROM workspace.aqi.gold_live_city_hourly)
-""")
+try:
+    live = run_query("""
+        SELECT city, state, reading_time, stations_reporting, pm25, pm10
+        FROM workspace.aqi.gold_live_city_hourly
+        WHERE reading_time = (SELECT MAX(reading_time) FROM workspace.aqi.gold_live_city_hourly)
+    """)
+except Exception as error:
+    print(f"[data load error] {type(error).__name__}: {str(error)[:300]}")
+    st.title("🌫️ How clean is India's air right now?")
+    st.warning(
+        "**The data service is waking up.** It goes to sleep when nobody has used it "
+        "for a while, and can take a minute or two to start. Please try again shortly."
+    )
+    if st.button("🔄 Try again"):
+        get_connection.clear()
+        run_query.clear()
+        st.rerun()
+    st.stop()
 live["reading_time"] = as_ist(live["reading_time"])
 live = live[live["pm25"].notna()].copy()
 live["level"] = live["pm25"].apply(lambda v: level_for(v)["name"])
