@@ -11,3 +11,4 @@ data/
 # Python
 __pycache__/
 venv/
+logs/

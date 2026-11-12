@@ -884,6 +884,55 @@ A public web app that a non-technical person can understand in seconds:
 
 ---
 
+## Day 8: Operations after launch (12-13 Nov 2026)
+
+### Issue 1: App crashed with a Databricks connection error
+- Symptom: `databricks.sql.exc.RequestError` while opening a session,
+  after several days without visitors
+- Likely cause: the serverless SQL warehouse was asleep and took too long
+  to start (other possible causes: Free Edition compute limits, token problems)
+- Diagnosis steps: Manage app -> logs; check warehouse status in
+  Databricks (SQL Warehouses); test a query in the SQL Editor; reboot the app
+- Fix in the app:
+  - get_connection() retries up to 3 times with growing waits and allows
+    up to 3 minutes per attempt (`_retry_stop_after_attempts_duration=180`)
+  - Each failure logged as `[connection error]` (visible in Manage app)
+  - If data still can't load, visitors see a friendly "The data service is
+    waking up" message with a "Try again" button (clears the cached
+    connection and results) instead of a technical traceback
+- Lesson: design for the failure users will actually hit; never show a
+  raw traceback to non-technical visitors
+
+### Issue 2: App showed data from 9 Nov on 12 Nov ("91 hours ago")
+- Cause: the self-hosted runner wasn't running, so the pipeline didn't run;
+  the app correctly showed the latest available data and its age
+- The honest "hours ago" label worked as designed
+- Immediate fix: start the runner, run the workflow manually, reboot the app
+
+### Fix: fresh data at every login
+- `start_aqi.bat` (project root):
+  1. waits 60 seconds for the internet connection
+  2. activates the venv and runs `fetch_live_aqi.py` once immediately
+     (output appended to `logs/login_runs.log`, with a date/time header,
+     errors included via `2>&1`)
+  3. starts the GitHub Actions runner for the regular 3-hour schedule
+- Windows Task Scheduler task "AQI startup": trigger "When I log on",
+  action = start_aqi.bat, start in = project folder (no quotes)
+- `logs/` added to .gitignore
+- Result: fresh data within ~2 minutes of logging in; updates every 3 hours
+  while the laptop is on; the next login catches up after the laptop was off
+- Note: the runner window must stay open (minimize, don't close)
+
+### Decision: stay on Streamlit instead of moving to Vercel
+- The stale-data problem was ingestion, not hosting
+- Vercel also runs on cloud servers, which the government API blocks
+- Vercel can't run Streamlit apps; moving would mean rebuilding the app
+  (e.g. JavaScript frontend + separate Python API) with no benefit here
+- Option for 24/7 updates later: an always-on server in an Indian region
+  (needs a test first, since the API may block all cloud IPs)
+
+---
+
 ## Key insights so far (summary)
 1. About 26% of recorded days were Poor or worse; only 5% were Good
 2. Delhi's average AQI fell 25% from 2015 to 2019, improving every year
@@ -952,6 +1001,8 @@ A public web app that a non-technical person can understand in seconds:
 - **Deployment & docs:** Streamlit Community Cloud (GitHub-based deploy,
   private repo access, cloud secrets), README with Mermaid diagram,
   operations runbook
+- **Operations:** graceful failure handling, connection retries for
+  cold starts, Windows Task Scheduler, batch scripts, log files
 - **DevOps:** virtual environments, requirements.txt, .gitignore
   (incl. ! exceptions), GitHub Secrets, GitHub Actions (YAML, cron,
   workflow_dispatch, self-hosted runner, per-step timeouts)
@@ -978,7 +1029,9 @@ A public web app that a non-technical person can understand in seconds:
 - App confirmed public (anyone with the link) in an incognito window
 
 ### Ongoing maintenance
-- Start the self-hosted runner when working, so live data stays fresh
+- Runner and a fresh pipeline run start automatically at login
+  (Task Scheduler + start_aqi.bat); keep the runner window open
+- Check logs/login_runs.log occasionally; clear it every few weeks
 - Renew the Databricks token before 90 days (in all four places)
 - Update GEMINI_MODEL if Google retires the current model
 
