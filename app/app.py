@@ -21,7 +21,7 @@ if st.query_params.get("openaqtest") == "1":
     try:
         response = requests.get(
             "https://api.openaq.org/v3/parameters/2/latest",
-            params={"countries_id": 9, "limit": 1000},
+            params={"bbox": "68,6,98,37", "limit": 1000},
             headers=headers, timeout=60,
         )
         st.write("Status code:", response.status_code,
