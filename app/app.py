@@ -11,46 +11,51 @@ from databricks import sql
 
 st.set_page_config(page_title="How clean is India's air?", page_icon="🌫️", layout="wide")
 
-# ---------- TEMPORARY: test OpenAQ reachability and Indian coverage ----------
+# ---------- TEMPORARY: test OpenAQ latest PM2.5 values for India ----------
 if st.query_params.get("openaqtest") == "1":
     import requests
 
-    st.title("OpenAQ test")
+    st.title("OpenAQ test: latest values")
     headers = {"X-API-Key": st.secrets["OPENAQ_API_KEY"]}
     started = time.time()
     try:
         response = requests.get(
-            "https://api.openaq.org/v3/locations",
-            params={"countries_id": 9, "parameters_id": 2, "limit": 1000},
+            "https://api.openaq.org/v3/parameters/2/latest",
+            params={"countries_id": 9, "limit": 1000},
             headers=headers, timeout=60,
         )
         st.write("Status code:", response.status_code,
                  "| Time taken:", round(time.time() - started, 1), "seconds")
 
         if response.ok:
-            results = response.json().get("results", [])
-            st.success(f"✅ Reachable! Indian locations with PM2.5: {len(results)}")
+            body = response.json()
+            results = body.get("results", [])
+            st.write("Results returned:", len(results),
+                     "| Total found:", body.get("meta", {}).get("found"))
 
             rows = []
-            for loc in results:
-                last = (loc.get("datetimeLast") or {}).get("utc")
-                rows.append({"name": loc.get("name"), "locality": loc.get("locality"),
-                             "last_update_utc": last})
+            for r in results:
+                coords = r.get("coordinates") or {}
+                rows.append({
+                    "location_id": r.get("locationsId"),
+                    "pm25": r.get("value"),
+                    "time_utc": (r.get("datetime") or {}).get("utc"),
+                    "lat": coords.get("latitude"),
+                    "lon": coords.get("longitude"),
+                })
             df_test = pd.DataFrame(rows)
-            df_test["last_update_utc"] = pd.to_datetime(df_test["last_update_utc"], utc=True,
-                                                        errors="coerce")
-            age_hours = (pd.Timestamp.now(tz="UTC") - df_test["last_update_utc"]).dt.total_seconds() / 3600
+            df_test["time_utc"] = pd.to_datetime(df_test["time_utc"], utc=True, errors="coerce")
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Updated in last 3 hours", int((age_hours <= 3).sum()))
-            c2.metric("Updated in last 24 hours", int((age_hours <= 24).sum()))
-            c3.metric("Older than 30 days", int((age_hours > 24 * 30).sum()))
+            # Check whether the results are really in India (rough box around India)
+            in_india = df_test["lat"].between(6, 37) & df_test["lon"].between(68, 98)
+            st.write("Results inside India's area:", int(in_india.sum()), "of", len(df_test))
 
-            st.dataframe(df_test.sort_values("last_update_utc", ascending=False).head(20),
+            st.dataframe(df_test.sort_values("time_utc", ascending=False).head(20),
                          use_container_width=True, hide_index=True)
+        else:
+            st.write(response.text[:300])
     except Exception as error:
-        st.error(f"❌ Not reachable: {type(error).__name__} after "
-                 f"{time.time() - started:.0f} seconds")
+        st.error(f"❌ Error: {type(error).__name__} after {time.time() - started:.0f} seconds")
     st.stop()
 
 # Bigger, readable chart text everywhere
