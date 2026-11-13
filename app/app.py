@@ -11,6 +11,31 @@ from databricks import sql
 
 st.set_page_config(page_title="How clean is India's air?", page_icon="🌫️", layout="wide")
 
+# ---------- TEMPORARY: test whether this server can reach data.gov.in ----------
+if st.query_params.get("apitest") == "1":
+    import requests
+
+    st.title("API reachability test")
+    url = "https://api.data.gov.in/resource/3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
+    params = {"api-key": st.secrets["DATA_GOV_API_KEY"], "format": "json", "limit": 5}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AQI-Project/1.0"}
+
+    started = time.time()
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=60)
+        seconds = time.time() - started
+        st.write("Status code:", response.status_code)
+        st.write("Time taken:", round(seconds, 1), "seconds")
+        if response.ok:
+            data = response.json()
+            st.success(f"✅ Reachable! Total records available: {data.get('total')}")
+            st.write("Latest reading time:", data["records"][0]["last_update"])
+    except Exception as error:
+        seconds = time.time() - started
+        # Never show the URL (it contains the key): only the error type
+        st.error(f"❌ Not reachable: {type(error).__name__} after {seconds:.0f} seconds")
+    st.stop()
+
 # Bigger, readable chart text everywhere
 pio.templates["aqi"] = go.layout.Template(layout=dict(
     font=dict(size=15, color="#1B2631"),
