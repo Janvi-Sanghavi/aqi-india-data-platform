@@ -1,8 +1,12 @@
+import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
+import requests
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -10,53 +14,6 @@ import streamlit as st
 from databricks import sql
 
 st.set_page_config(page_title="How clean is India's air?", page_icon="🌫️", layout="wide")
-
-# ---------- TEMPORARY: test OpenAQ latest PM2.5 values for India ----------
-if st.query_params.get("openaqtest") == "1":
-    import requests
-
-    st.title("OpenAQ test: latest values")
-    headers = {"X-API-Key": st.secrets["OPENAQ_API_KEY"]}
-    started = time.time()
-    try:
-        response = requests.get(
-            "https://api.openaq.org/v3/parameters/2/latest",
-            params={"bbox": "68,6,98,37", "limit": 1000},
-            headers=headers, timeout=60,
-        )
-        st.write("Status code:", response.status_code,
-                 "| Time taken:", round(time.time() - started, 1), "seconds")
-
-        if response.ok:
-            body = response.json()
-            results = body.get("results", [])
-            st.write("Results returned:", len(results),
-                     "| Total found:", body.get("meta", {}).get("found"))
-
-            rows = []
-            for r in results:
-                coords = r.get("coordinates") or {}
-                rows.append({
-                    "location_id": r.get("locationsId"),
-                    "pm25": r.get("value"),
-                    "time_utc": (r.get("datetime") or {}).get("utc"),
-                    "lat": coords.get("latitude"),
-                    "lon": coords.get("longitude"),
-                })
-            df_test = pd.DataFrame(rows)
-            df_test["time_utc"] = pd.to_datetime(df_test["time_utc"], utc=True, errors="coerce")
-
-            # Check whether the results are really in India (rough box around India)
-            in_india = df_test["lat"].between(6, 37) & df_test["lon"].between(68, 98)
-            st.write("Results inside India's area:", int(in_india.sum()), "of", len(df_test))
-
-            st.dataframe(df_test.sort_values("time_utc", ascending=False).head(20),
-                         use_container_width=True, hide_index=True)
-        else:
-            st.write(response.text[:300])
-    except Exception as error:
-        st.error(f"❌ Error: {type(error).__name__} after {time.time() - started:.0f} seconds")
-    st.stop()
 
 # Bigger, readable chart text everywhere
 pio.templates["aqi"] = go.layout.Template(layout=dict(
@@ -165,6 +122,101 @@ def run_query(query, params=None):
         return _fetch(query, params)
 
 
+# ---------- Live data from OpenAQ (works from the cloud, 24/7) ----------
+OPENAQ_BASE = "https://api.openaq.org/v3"
+INDIA_ID = 9      # OpenAQ country id for India
+PM25_ID = 2       # OpenAQ parameter id for PM2.5
+PAGE_SIZE = 1000
+
+
+def openaq_get(path, params):
+    """Call the OpenAQ API (key sent in a header, never shown)."""
+    response = requests.get(
+        f"{OPENAQ_BASE}{path}",
+        params=params,
+        headers={"X-API-Key": st.secrets["OPENAQ_API_KEY"]},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def india_pm25_location_ids():
+    """IDs of Indian stations measuring PM2.5 (this endpoint DOES filter by country). Cached 6 h."""
+    ids, page = set(), 1
+    while True:
+        results = openaq_get("/locations", {"countries_id": INDIA_ID, "parameters_id": PM25_ID,
+                                            "limit": PAGE_SIZE, "page": page}).get("results", [])
+        ids.update(r["id"] for r in results)
+        if len(results) < PAGE_SIZE:
+            return ids
+        page += 1
+
+
+@st.cache_data(ttl=1800, show_spinner="Getting the latest readings...")
+def openaq_latest_india():
+    """Latest PM2.5 for Indian stations.
+
+    The latest-values endpoint ignores country filters, so we download every page
+    (in parallel) and keep only the Indian station IDs. Cached 30 min.
+    """
+    ids = india_pm25_location_ids()
+    first = openaq_get(f"/parameters/{PM25_ID}/latest", {"limit": PAGE_SIZE, "page": 1})
+    try:
+        pages = math.ceil(int(first.get("meta", {}).get("found")) / PAGE_SIZE)
+    except (TypeError, ValueError):
+        pages = 30
+
+    def fetch(page):
+        return openaq_get(f"/parameters/{PM25_ID}/latest",
+                          {"limit": PAGE_SIZE, "page": page}).get("results", [])
+
+    results = list(first.get("results", []))
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        for page_results in pool.map(fetch, range(2, pages + 1)):
+            results.extend(page_results)
+
+    rows = [{
+        "location_id": r.get("locationsId"),
+        "pm25": r.get("value"),
+        "time_utc": (r.get("datetime") or {}).get("utc"),
+        "lat": (r.get("coordinates") or {}).get("latitude"),
+        "lon": (r.get("coordinates") or {}).get("longitude"),
+    } for r in results if r.get("locationsId") in ids]
+    return pd.DataFrame(rows)
+
+
+def build_openaq_live(readings, stations):
+    """Match each OpenAQ station to the nearest known CPCB station's city, then average by city."""
+    df = readings.dropna(subset=["pm25", "lat", "lon", "time_utc"]).copy()
+    df["time_utc"] = pd.to_datetime(df["time_utc"], utc=True, errors="coerce")
+    now = pd.Timestamp.now(tz="UTC")
+    df = df[(df["time_utc"] >= now - pd.Timedelta(hours=3))      # recent readings only
+            & df["pm25"].between(0, 2000)]                       # drop impossible values
+    if df.empty or stations.empty:
+        return pd.DataFrame()
+
+    # Nearest known station (haversine distance, km)
+    lat1, lon1 = np.radians(df["lat"].to_numpy())[:, None], np.radians(df["lon"].to_numpy())[:, None]
+    lat2, lon2 = np.radians(stations["lat"].to_numpy())[None, :], np.radians(stations["lon"].to_numpy())[None, :]
+    a = (np.sin((lat2 - lat1) / 2) ** 2
+         + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2)
+    distance_km = 6371 * 2 * np.arcsin(np.sqrt(a))
+    nearest = distance_km.argmin(axis=1)
+
+    df["city"] = stations["city"].to_numpy()[nearest]
+    df["state"] = stations["state"].to_numpy()[nearest]
+    df = df[distance_km.min(axis=1) <= 10]                       # only confident matches
+    df["reading_time"] = df["time_utc"].dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+
+    return (df.groupby(["city", "state"], as_index=False)
+              .agg(pm25=("pm25", "mean"),
+                   stations_reporting=("location_id", "nunique"),
+                   reading_time=("reading_time", "max"))
+              .assign(pm10=np.nan))
+
+
 def level_for(pm25):
     """Return the CPCB level (dictionary) for a PM2.5 value, or None if missing."""
     if pd.isna(pm25):
@@ -263,6 +315,24 @@ except Exception as error:
     st.stop()
 live["reading_time"] = as_ist(live["reading_time"])
 live = live[live["pm25"].notna()].copy()
+data_source = "our CPCB pipeline (data.gov.in)"
+
+# Use OpenAQ's fresher readings when available (works 24/7, even if the pipeline laptop is off)
+if "OPENAQ_API_KEY" in st.secrets:
+    try:
+        known_stations = run_query("""
+            SELECT station, city, state,
+                   MAX(latitude) AS lat, MAX(longitude) AS lon
+            FROM workspace.aqi.silver_live_aqi
+            WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+            GROUP BY station, city, state
+        """)
+        live_openaq = build_openaq_live(openaq_latest_india(), known_stations)
+        if not live_openaq.empty and live_openaq["reading_time"].max() > live["reading_time"].max():
+            live = live_openaq
+            data_source = "CPCB stations via OpenAQ (fetched live)"
+    except Exception as error:
+        print(f"[openaq error] {type(error).__name__}: {str(error)[:300]}")
 live["level"] = live["pm25"].apply(lambda v: level_for(v)["name"])
 latest = live["reading_time"].max()
 now_ist = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
@@ -274,7 +344,8 @@ st.markdown(
     f"Live readings from **{int(live['stations_reporting'].sum())} government monitoring "
     f"stations** in **{live['city'].nunique()} cities**. "
     f"Last updated **{latest:%d %b, %I:%M %p}** "
-    f"({hours_old:.0f} hour{'s' if round(hours_old) != 1 else ''} ago)."
+    f"({hours_old:.0f} hour{'s' if round(hours_old) != 1 else ''} ago). "
+    f"Source: {data_source}."
 )
 
 # ---------- AI briefing (placeholder: filled in at the END, so the page loads first) ----------
@@ -513,7 +584,10 @@ with tab_trust:
             "so it can underestimate sudden extreme spikes.\n"
             "- Live readings are hourly, while the safe limit is defined for a 24-hour average, "
             "so 'times the safe limit' is an indication, not an official exceedance.\n"
-            "- Earlier test runs during setup (before 6 Nov) are not counted in the success rate."
+            "- Earlier test runs during setup (before 6 Nov) are not counted in the success rate.\n"
+            "- When fresher, live values come from OpenAQ (which collects the same CPCB stations). "
+            "Stations are matched to cities by distance (within 10 km), so values may differ "
+            "slightly from the pipeline's figures."
         )
 
 # ---------- Glossary ----------
