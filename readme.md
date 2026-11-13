@@ -43,7 +43,7 @@ This project builds a complete data platform to answer three questions:
 2. **Can people be warned a day in advance** before unhealthy air arrives?
 3. **Can the data be trusted**, given that government sensor data contains gaps and errors?
 
-It combines five years of historical data (2015–2020, 26 cities) with a **live feed** from 550+ government monitoring stations in 270+ cities, refreshed automatically every 3 hours and immediately whenever the host machine starts up.
+It combines five years of historical data (2015–2020, 26 cities) with a **live feed** from 550+ government monitoring stations in 270+ cities. A scheduled pipeline stores and quality-checks the data, and the app additionally fetches the **latest readings on demand** through OpenAQ, so it shows near-current air quality at any time.
 
 ---
 
@@ -67,6 +67,7 @@ flowchart LR
     subgraph Sources
         A[data.gov.in<br/>live API]
         K[Kaggle CPCB<br/>2015–2020]
+        O[OpenAQ API<br/>latest readings]
     end
 
     subgraph Ingestion
@@ -100,6 +101,7 @@ flowchart LR
     M --> P
     M --> W
     L --> W
+    O -->|on demand,<br/>matched to cities| W
 ```
 
 The platform follows the **medallion architecture**:
@@ -134,6 +136,7 @@ The platform follows the **medallion architecture**:
 ### Application and AI
 - **Streamlit web app** designed for non-technical users: city status card with health advice, city comparison, forecast explained in plain language, and a data-trust page
 - **AI daily briefing** generated with Google Gemini, **grounded** in pre-computed facts to prevent hallucinated numbers, and cached once per data update
+- **Always current:** the government API blocks cloud servers, so the app fetches the latest PM2.5 from **OpenAQ** (which collects the same CPCB stations), downloads pages in parallel, matches stations to cities by **nearest-station distance**, and falls back to the pipeline's data if OpenAQ is unavailable
 - **Resilient by design:** reuses one database connection, retries patiently while the serverless warehouse wakes up, and shows a friendly "waking up" message with a retry button instead of an error
 
 ---
@@ -175,6 +178,7 @@ Every run is recorded in a **run log** (status, rows loaded, failed checks, erro
 | BI | Power BI (DAX, Power Query) |
 | Application | Streamlit, Plotly |
 | Generative AI | Google Gemini API |
+| External APIs | data.gov.in (CPCB), OpenAQ v3 |
 | Version control | Git, GitHub |
 
 ---
@@ -236,7 +240,8 @@ Full setup, monitoring, and troubleshooting instructions are in the **[runbook](
 ## Data sources
 
 - **Historical:** [Air Quality Data in India (2015–2020)](https://www.kaggle.com/datasets/rohanrao/air-quality-data-in-india), Central Pollution Control Board data compiled on Kaggle
-- **Live:** [Real time Air Quality Index from various locations](https://data.gov.in), Central Pollution Control Board via the Open Government Data Platform India
+- **Live (pipeline):** [Real time Air Quality Index from various locations](https://data.gov.in), Central Pollution Control Board via the Open Government Data Platform India
+- **Live (app, on demand):** [OpenAQ](https://openaq.org), an open platform that aggregates government monitoring data, including CPCB stations
 
 ---
 
@@ -245,6 +250,7 @@ Full setup, monitoring, and troubleshooting instructions are in the **[runbook](
 - City values are averages of the stations that reported; cities with a single station are excluded from rankings.
 - Live readings are hourly, while India's PM2.5 safe limit applies to a 24-hour average, so comparisons with the limit are indicative.
 - The forecast is evaluated on Delhi only and does not use weather data, so it can underestimate sudden extreme spikes.
+- The app's on-demand readings come from OpenAQ and are matched to cities by distance (within 10 km), so they can differ slightly from the pipeline's figures.
 - Scheduled runs pause while the self-hosted runner (a laptop) is offline; the login startup script and the incremental design catch up automatically, and the app always shows how old the data is.
 
 ---

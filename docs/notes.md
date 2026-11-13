@@ -923,6 +923,50 @@ A public web app that a non-technical person can understand in seconds:
   while the laptop is on; the next login catches up after the laptop was off
 - Note: the runner window must stay open (minimize, don't close)
 
+### Goal: the app should show the CURRENT air when opened (13 Nov)
+Options considered:
+- A: fetch data.gov.in directly from Streamlit Cloud -> tested, NOT possible
+- B: "Refresh now" button that triggers the pipeline -> needs the laptop on
+- C: OpenAQ as a live source -> chosen (works 24/7, laptop on or off)
+
+### Test 1: can Streamlit Cloud reach data.gov.in? (hidden page ?apitest=1)
+- Result: ConnectionError after 0 seconds -> refused instantly
+- Conclusion: data.gov.in blocks cloud servers (GitHub AND Streamlit);
+  it can only be reached from the laptop
+
+### Tests 2-4: OpenAQ (hidden page ?openaqtest=1)
+- OpenAQ: free open platform collecting air quality data worldwide,
+  including India's CPCB stations; free API key, sent in the X-API-Key header
+- /v3/locations?countries_id=9&parameters_id=2 (India, PM2.5): reachable,
+  765 Indian PM2.5 locations; 555 updated in the last 3 hours; 173 inactive
+  (older than 30 days); newest reading about 45 minutes old
+- Locality (city) mostly empty -> city names must come from elsewhere
+- /v3/parameters/2/latest IGNORES countries_id: returned 21,726 results
+  worldwide, only 40 of 1,000 inside India
+- bbox (India box 68,6,98,37) also IGNORED: same 21,726 results
+- Lesson: verify filters with the data itself (coordinates check),
+  never trust that a parameter worked
+
+### Solution: OpenAQ live data in the app (app/app.py)
+1. india_pm25_location_ids(): Indian PM2.5 station IDs from /locations
+   (country filter works there); cached 6 hours
+2. openaq_latest_india(): downloads all ~22 pages of latest PM2.5 values
+   IN PARALLEL (ThreadPoolExecutor, 5 at a time: ~3 s instead of ~15 s),
+   keeps only Indian station IDs; cached 30 minutes
+3. build_openaq_live(): keeps readings from the last 3 hours and values
+   0-2000; matches each OpenAQ station to the NEAREST known CPCB station
+   in silver_live_aqi (haversine distance), keeping matches within 10 km;
+   averages by city (same columns as the pipeline's gold table)
+4. Uses OpenAQ only if it is FRESHER than the pipeline's data; any OpenAQ
+   error falls back to the pipeline silently (logged as [openaq error])
+5. Header shows the source; known limitations mention the matching
+- Secrets: OPENAQ_API_KEY added to Streamlit Cloud and local secrets.toml
+- Result: app showed data from 6:31 PM when opened at 6:56 PM (25 minutes old)
+  without the pipeline running
+- Roles now: OpenAQ = freshness for the app; pipeline = history, quality
+  checks, station coordinates for matching, Power BI, forecast
+- The city trend chart still uses the pipeline's history
+
 ### Decision: stay on Streamlit instead of moving to Vercel
 - The stale-data problem was ingestion, not hosting
 - Vercel also runs on cloud servers, which the government API blocks
@@ -1001,6 +1045,9 @@ A public web app that a non-technical person can understand in seconds:
 - **Deployment & docs:** Streamlit Community Cloud (GitHub-based deploy,
   private repo access, cloud secrets), README with Mermaid diagram,
   operations runbook
+- **APIs & integration:** OpenAQ v3 (API key headers, pagination,
+  verifying filters), parallel requests (ThreadPoolExecutor), spatial
+  matching (haversine nearest neighbour), source fallback
 - **Operations:** graceful failure handling, connection retries for
   cold starts, Windows Task Scheduler, batch scripts, log files
 - **DevOps:** virtual environments, requirements.txt, .gitignore
