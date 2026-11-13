@@ -43,7 +43,7 @@ This project builds a complete data platform to answer three questions:
 2. **Can people be warned a day in advance** before unhealthy air arrives?
 3. **Can the data be trusted**, given that government sensor data contains gaps and errors?
 
-It combines five years of historical data (2015–2020, 26 cities) with a **live feed** from 550+ government monitoring stations in 270+ cities, refreshed automatically every 3 hours.
+It combines five years of historical data (2015–2020, 26 cities) with a **live feed** from 550+ government monitoring stations in 270+ cities, refreshed automatically every 3 hours and immediately whenever the host machine starts up.
 
 ---
 
@@ -70,7 +70,7 @@ flowchart LR
     end
 
     subgraph Ingestion
-        B[GitHub Actions<br/>every 3 hours<br/>self-hosted runner]
+        B[GitHub Actions<br/>every 3 hours +<br/>run at login<br/>self-hosted runner]
     end
 
     subgraph Databricks Lakehouse
@@ -117,6 +117,7 @@ The platform follows the **medallion architecture**:
 ### Data engineering
 - **Live ingestion** from a government REST API with pagination, retries with exponential backoff, timeouts, and secret-safe error logging
 - **Scheduled automation** with GitHub Actions on a **self-hosted runner**, chosen because the government API blocks cloud-hosted IPs
+- **Catch-up at login:** a startup script (Windows Task Scheduler) runs the pipeline immediately when the host logs in, then starts the runner, so data is fresh within minutes after any downtime
 - **Incremental, idempotent loading**: `COPY INTO` loads only new files; `MERGE` inserts only new readings
 - **Star schema** data model with surrogate keys and a date dimension built for future data
 - **PySpark** silver layer, partitioned by year and verified identical to the SQL implementation
@@ -133,6 +134,7 @@ The platform follows the **medallion architecture**:
 ### Application and AI
 - **Streamlit web app** designed for non-technical users: city status card with health advice, city comparison, forecast explained in plain language, and a data-trust page
 - **AI daily briefing** generated with Google Gemini, **grounded** in pre-computed facts to prevent hallucinated numbers, and cached once per data update
+- **Resilient by design:** reuses one database connection, retries patiently while the serverless warehouse wakes up, and shows a friendly "waking up" message with a retry button instead of an error
 
 ---
 
@@ -202,6 +204,7 @@ aqi-india-data-platform/
 ├── .github/workflows/
 │   └── ingest_live_aqi.yml        # Scheduled ingestion
 ├── .streamlit/config.toml         # App theme
+├── start_aqi.bat                  # Login startup: run pipeline now, then start the runner
 └── requirements.txt
 ```
 
@@ -242,7 +245,7 @@ Full setup, monitoring, and troubleshooting instructions are in the **[runbook](
 - City values are averages of the stations that reported; cities with a single station are excluded from rankings.
 - Live readings are hourly, while India's PM2.5 safe limit applies to a 24-hour average, so comparisons with the limit are indicative.
 - The forecast is evaluated on Delhi only and does not use weather data, so it can underestimate sudden extreme spikes.
-- Scheduled runs pause while the self-hosted runner is offline; the incremental design catches up automatically on the next run.
+- Scheduled runs pause while the self-hosted runner (a laptop) is offline; the login startup script and the incremental design catch up automatically, and the app always shows how old the data is.
 
 ---
 
