@@ -11,6 +11,48 @@ from databricks import sql
 
 st.set_page_config(page_title="How clean is India's air?", page_icon="🌫️", layout="wide")
 
+# ---------- TEMPORARY: test OpenAQ reachability and Indian coverage ----------
+if st.query_params.get("openaqtest") == "1":
+    import requests
+
+    st.title("OpenAQ test")
+    headers = {"X-API-Key": st.secrets["OPENAQ_API_KEY"]}
+    started = time.time()
+    try:
+        response = requests.get(
+            "https://api.openaq.org/v3/locations",
+            params={"countries_id": 9, "parameters_id": 2, "limit": 1000},
+            headers=headers, timeout=60,
+        )
+        st.write("Status code:", response.status_code,
+                 "| Time taken:", round(time.time() - started, 1), "seconds")
+
+        if response.ok:
+            results = response.json().get("results", [])
+            st.success(f"✅ Reachable! Indian locations with PM2.5: {len(results)}")
+
+            rows = []
+            for loc in results:
+                last = (loc.get("datetimeLast") or {}).get("utc")
+                rows.append({"name": loc.get("name"), "locality": loc.get("locality"),
+                             "last_update_utc": last})
+            df_test = pd.DataFrame(rows)
+            df_test["last_update_utc"] = pd.to_datetime(df_test["last_update_utc"], utc=True,
+                                                        errors="coerce")
+            age_hours = (pd.Timestamp.now(tz="UTC") - df_test["last_update_utc"]).dt.total_seconds() / 3600
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Updated in last 3 hours", int((age_hours <= 3).sum()))
+            c2.metric("Updated in last 24 hours", int((age_hours <= 24).sum()))
+            c3.metric("Older than 30 days", int((age_hours > 24 * 30).sum()))
+
+            st.dataframe(df_test.sort_values("last_update_utc", ascending=False).head(20),
+                         use_container_width=True, hide_index=True)
+    except Exception as error:
+        st.error(f"❌ Not reachable: {type(error).__name__} after "
+                 f"{time.time() - started:.0f} seconds")
+    st.stop()
+
 # Bigger, readable chart text everywhere
 pio.templates["aqi"] = go.layout.Template(layout=dict(
     font=dict(size=15, color="#1B2631"),
