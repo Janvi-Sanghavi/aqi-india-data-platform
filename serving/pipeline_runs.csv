@@ -1,0 +1,83 @@
+run_id,run_started_utc,status,records_fetched,readings_inserted,message
+69992ee2-4ede-4212-aa15-be4a1a0b9eb2,2026-11-16T17:57:34.003Z,success,3976,3942,
+b4fca6d0-ce56-430d-89b0-5df15076ac4e,2026-11-12T19:21:52.705Z,success,3983,3983,
+f20fcf26-d8c7-4d9c-974b-a417dad1b1b4,2026-11-08T19:14:56.870Z,success,3969,3920,
+a0115a01-dba2-4cd6-87f9-5a38e6a4dc1c,2026-11-08T18:26:44.353Z,success,3969,0,
+b320f2ac-b1d5-42fc-8c5d-b68c886b8c0c,2026-11-08T18:24:50.886Z,success,3969,35,
+6d6c9a9e-1624-4d64-b957-78eda9c6d338,2026-11-08T18:22:40.573Z,success,3969,3934,
+413ed04f-1622-435e-9011-0472eabaef51,2026-11-07T17:12:04.891Z,success,3997,3907,
+82d589d9-8057-4bf1-b8c8-bca1b13a7963,2026-11-07T15:47:00.029Z,success,3990,10,
+2dd17a67-4ed7-4de2-b9b8-22ba14a35448,2026-11-07T15:45:19.961Z,success,3990,40,
+042870c0-0104-48ca-af61-66d369d69e85,2026-11-07T15:42:54.099Z,success,3990,3940,
+4716afaa-08e7-4436-ae5e-307e5e95736f,2026-11-06T17:29:41.277Z,success,3997,9,
+f908532d-9795-428f-b273-3f10611fad61,2026-11-06T17:21:46.457Z,failed,3997,,TimeoutError: Timed out after 0:05:00
+e4a788f5-923b-417c-8dcc-b6fb500a76cb,2026-11-06T17:20:01.905Z,success,3997,3988,
+bb0ff092-b1ab-4b57-9c29-a2815d98685b,2026-11-05T18:46:04.674Z,success,3969,0,
+4f044cee-00c1-45d3-873f-d9278078d050,2026-11-05T18:43:19.172Z,failed,3969,0,"RuntimeError: SQL failed: 
+[PARSE_SYNTAX_ERROR] Syntax error at or near end of input. SQLSTATE: 42601 (line 57, pos 59)
+
+== SQL ==
+-- Data quality checks on the latest reading hour in silver
+WITH latest AS (
+  SELECT *
+  FROM workspace.aqi.silver_live_aqi
+  WHERE reading_time = (SELECT MAX(reading_time) FROM workspace.aqi.silver_live_aqi)
+)
+SELECT 'row_count' AS check_name,
+       CAST(COUNT(*) AS DOUBLE) AS check_value,
+       '>= 1000' AS threshold,
+       COUNT(*) >= 1000 AS passed,
+       'c"
+f6ebccb6-e158-4c32-9f8f-ed06e61dc5ff,2026-11-05T18:40:33.334Z,failed,3969,0,Critical checks failed: row_count
+fb3c46c3-153b-4f07-98c7-4bf26d3553a3,2026-11-05T18:39:07.920Z,failed,3969,27,"RuntimeError: SQL failed: 
+[PARSE_SYNTAX_ERROR] Syntax error at or near 'SELECT': extra input 'SELECT'. SQLSTATE: 42601 (line 19, pos 0)
+
+== SQL ==
+-- Live gold: One row per city per hour, pollutants as columns
+CREATE OR REPLACE TABLE workspace.aqi.gold_live_city_hourly AS
+SELECT
+    state,
+    city,
+    reading_time,
+    COUNT(DISTINCT station) AS stations_reporting,
+    ROUND(AVG(CASE WHEN pollutant = 'pm25' THEN avg_value END), 1) AS pm25,
+    ROUND(AVG(CASE WHEN pollutant = 'pm10' THEN avg_v"
+6708d8fe-3a63-4002-8cc2-5268d2e939dd,2026-11-05T18:08:39.594Z,success,3969,3942,
+9e7b223c-32ec-42f5-ba76-89349990bf5a,2026-11-05T17:59:01.716Z,success,3962,0,
+6caaa7f9-33cf-440c-b84c-126203ce9801,2026-11-05T17:58:41.232Z,failed,3962,,
+1600b80f-4990-417f-87d2-82391d541556,2026-11-05T17:57:35.918Z,failed,3962,0,"RuntimeError: SQL failed: 
+[PARSE_SYNTAX_ERROR] Syntax error at or near 'CREATE': extra input 'CREATE'. SQLSTATE: 42601 (line 15, pos 0)
+
+== SQL ==
+-- Step 1: Table that records every pipeline run
+CREATE TABLE IF NOT EXISTS workspace.aqi.pipeline_runs (
+    run_id STRING,
+    run_started_utc TIMESTAMP,
+    run_finished_utc TIMESTAMP,
+    status STRING,
+    records_fetched INT,
+    files_loaded INT,
+    readings_inserted INT,
+    checks_failed INT,
+    message STRING
+);
+
+-- Step 2: Table that rec"
+2d8ae71f-6b3c-4bf9-bfaa-bdd5aa98b610,2026-11-05T17:55:55.205Z,failed,3962,0,"RuntimeError: SQL failed: 
+[PARSE_SYNTAX_ERROR] Syntax error at or near 'CREATE': extra input 'CREATE'. SQLSTATE: 42601 (line 15, pos 0)
+
+== SQL ==
+-- Step 1: Table that records every pipeline run
+CREATE TABLE IF NOT EXISTS workspace.aqi.pipeline_runs (
+    run_id STRING,
+    run_started_utc TIMESTAMP,
+    run_finished_utc TIMESTAMP,
+    status STRING,
+    records_fetched INT,
+    files_loaded INT,
+    readings_inserted INT,
+    checks_failed INT,
+    message STRING
+);
+
+-- Step 2: Table that rec"
