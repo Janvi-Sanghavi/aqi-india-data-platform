@@ -122,6 +122,34 @@ def run_query(query, params=None):
         return _fetch(query, params)
 
 
+# ---------- Serving layer: small CSV files published by the pipeline to GitHub ----------
+# GitHub never sleeps, so the app reads these first and only falls back to Databricks.
+SERVING_BASE = ("https://raw.githubusercontent.com/Janvi-Sanghavi/"
+                "aqi-india-data-platform/serving-data/serving")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def read_serving(name):
+    """Read one serving CSV from GitHub (cached 10 min)."""
+    return pd.read_csv(f"{SERVING_BASE}/{name}")
+
+
+def load_data(serving_name, query, params=None):
+    """Serving file first (always available); Databricks only as a backup."""
+    try:
+        df = read_serving(serving_name)
+        if not df.empty:
+            return df
+    except Exception as error:
+        print(f"[serving error] {serving_name}: {type(error).__name__}: {str(error)[:200]}")
+    return run_query(query, params)
+
+
+def to_bool(series):
+    """Turn 'true'/'false' text (from CSV files) into real True/False values."""
+    return series.astype(str).str.strip().str.lower().isin(["true", "1"])
+
+
 # ---------- Live data from OpenAQ (works from the cloud, 24/7) ----------
 OPENAQ_BASE = "https://api.openaq.org/v3"
 INDIA_ID = 9      # OpenAQ country id for India
@@ -296,7 +324,7 @@ def info_box(label, big, note=""):
 
 # ---------- Load live data ----------
 try:
-    live = run_query("""
+    live = load_data("live_latest.csv", """
         SELECT city, state, reading_time, stations_reporting, pm25, pm10
         FROM workspace.aqi.gold_live_city_hourly
         WHERE reading_time = (SELECT MAX(reading_time) FROM workspace.aqi.gold_live_city_hourly)
@@ -311,6 +339,7 @@ except Exception as error:
     if st.button("🔄 Try again"):
         get_connection.clear()
         run_query.clear()
+        read_serving.clear()
         st.rerun()
     st.stop()
 live["reading_time"] = as_ist(live["reading_time"])
@@ -320,7 +349,7 @@ data_source = "our CPCB pipeline (data.gov.in)"
 # Use OpenAQ's fresher readings when available (works 24/7, even if the pipeline laptop is off)
 if "OPENAQ_API_KEY" in st.secrets:
     try:
-        known_stations = run_query("""
+        known_stations = load_data("stations.csv", """
             SELECT station, city, state,
                    MAX(latitude) AS lat, MAX(longitude) AS lon
             FROM workspace.aqi.silver_live_aqi
@@ -405,17 +434,24 @@ with tab_today:
     fig.update_layout(height=280, margin=dict(t=60, b=10, l=30, r=30))
     st.plotly_chart(fig, use_container_width=True)
 
-    trend = run_query("""
-        SELECT reading_time, pm25
-        FROM workspace.aqi.gold_live_city_hourly
-        WHERE city = :city AND pm25 IS NOT NULL
-        ORDER BY reading_time
-    """, {"city": city})
+    try:
+        history = load_data("live_history.csv", """
+            SELECT city, reading_time, pm25
+            FROM workspace.aqi.gold_live_city_hourly
+            WHERE pm25 IS NOT NULL
+              AND reading_time >= (SELECT MAX(reading_time) - INTERVAL 7 DAYS
+                                   FROM workspace.aqi.gold_live_city_hourly)
+        """)
+        trend = history[history["city"] == city].copy()
+    except Exception as error:
+        print(f"[history error] {type(error).__name__}: {str(error)[:200]}")
+        trend = pd.DataFrame()
     if len(trend) > 1:
         trend["reading_time"] = as_ist(trend["reading_time"])
+        trend = trend.sort_values("reading_time")
         fig = px.line(trend, x="reading_time", y="pm25", markers=True,
                       labels={"reading_time": "", "pm25": "Fine dust (µg/m³)"},
-                      title=f"Is the air in {city} getting better or worse?")
+                      title=f"Is the air in {city} getting better or worse? (last 7 days)")
         fig.add_hline(y=SAFE_LIMIT, line_dash="dash", line_color="#2E8B57",
                       annotation_text="Safe limit")
         fig.update_traces(line_color="#1F3A5F")
@@ -473,12 +509,13 @@ with tab_compare:
 
 # ---------- Tab 3: Forecast ----------
 with tab_forecast:
-    fc = run_query("""
+    fc = load_data("forecast_delhi_2019.csv", """
         SELECT date, actual_aqi_tomorrow, baseline_pred, xgb_pred
         FROM workspace.aqi.gold_forecast_delhi_2019
         ORDER BY date
     """)
     fc["date"] = pd.to_datetime(fc["date"])
+    fc = fc.sort_values("date")
     bad = fc["actual_aqi_tomorrow"] > 200
     warned = int((bad & (fc["xgb_pred"] > 200)).sum())
     missed_model = int((bad & (fc["xgb_pred"] <= 200)).sum())
@@ -533,16 +570,25 @@ with tab_trust:
         "and runs **6 automatic checks** before anything appears here."
     )
 
-    runs = run_query("""
-        SELECT run_id, run_started_utc, status, records_fetched, readings_inserted, message
-        FROM workspace.aqi.pipeline_runs
-        ORDER BY run_started_utc DESC
-        LIMIT 30
-    """)
+    if data_source.startswith("CPCB stations via OpenAQ"):
+        st.caption("Note: the live values above currently come from OpenAQ. The checks below "
+                   "describe our own pipeline, which stores the history and powers the charts.")
+
+    try:
+        runs = load_data("pipeline_runs.csv", """
+            SELECT run_id, run_started_utc, status, records_fetched, readings_inserted, message
+            FROM workspace.aqi.pipeline_runs
+            ORDER BY run_started_utc DESC
+            LIMIT 30
+        """)
+    except Exception as error:
+        print(f"[runs error] {type(error).__name__}: {str(error)[:200]}")
+        runs = pd.DataFrame()
     if runs.empty:
-        st.info("No automated runs recorded yet.")
+        st.info("Pipeline information is temporarily unavailable.")
     else:
-        runs["run_started_utc"] = pd.to_datetime(runs["run_started_utc"])
+        runs["run_started_utc"] = pd.to_datetime(runs["run_started_utc"], utc=True)
+        runs = runs.sort_values("run_started_utc", ascending=False)
         last = runs.iloc[0]
         last_ist = last["run_started_utc"].tz_convert("Asia/Kolkata")
         live_runs = runs[runs["run_started_utc"] >= PIPELINE_LIVE_SINCE]
@@ -559,19 +605,24 @@ with tab_trust:
             info_box("Updates that worked", f"{ok_rate:.0%}",
                      f"{len(live_runs)} updates since the system went live (6 Nov)")
 
-        checks = run_query("""
-            SELECT check_name, passed
-            FROM workspace.aqi.data_quality_results
-            WHERE run_id = :run_id
-        """, {"run_id": last["run_id"]})
+        try:
+            checks = load_data("quality_latest.csv", """
+                SELECT check_name, passed
+                FROM workspace.aqi.data_quality_results
+                WHERE run_id = :run_id
+            """, {"run_id": last["run_id"]})
+        except Exception as error:
+            print(f"[checks error] {type(error).__name__}: {str(error)[:200]}")
+            checks = pd.DataFrame()
         st.markdown("#### Today's automatic checks")
         if checks.empty:
             st.caption("No checks recorded for the latest update.")
         else:
-            passed = int(checks["passed"].astype(bool).sum())
+            checks["ok"] = to_bool(checks["passed"])
+            passed = int(checks["ok"].sum())
             st.markdown(f"**{passed} of {len(checks)} checks passed.**")
             for _, chk in checks.iterrows():
-                icon = "✅" if bool(chk["passed"]) else "❌"
+                icon = "✅" if chk["ok"] else "❌"
                 st.markdown(f"{icon} {CHECK_NAMES.get(chk['check_name'], chk['check_name'])}")
 
     with st.expander("Known limitations (we're honest about these)"):

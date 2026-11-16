@@ -37,5 +37,6 @@ jobs:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
           DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_WAREHOUSE_ID }}
+          GH_PUBLISH_TOKEN: ${{ secrets.GH_PUBLISH_TOKEN }}
           PYTHONUNBUFFERED: "1"
         run: .venv\Scripts\python ingestion\fetch_live_aqi.py
