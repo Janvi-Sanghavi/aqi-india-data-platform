@@ -38,6 +38,7 @@ data.gov.in API -> fetch (pagination, retries, User-Agent)
   -> rebuild gold_live_city_hourly (city-level, pollutants as columns)
   -> 6 quality checks -> data_quality_results
   -> run logged -> pipeline_runs (always, even on failure)
+  -> 6 small CSVs exported -> GitHub branch serving-data (read by the app)
 ```
 
 ---
@@ -870,7 +871,9 @@ A public web app that a non-technical person can understand in seconds:
 | GitHub Secrets | GitHub Actions (scheduled pipeline) |
 | .streamlit/secrets.toml | App on the laptop |
 | Streamlit Cloud secrets | Deployed app |
-- Databricks token expires after 90 days: renew in ALL four places
+| Power BI data source settings | Power BI refresh |
+- Databricks token expires after 90 days: renew in ALL five places
+- (Day 9) GH_PUBLISH_TOKEN: .env and GitHub Secrets; also expires in 90 days
 
 ### Documentation
 - README.md (project root): badges, live app link, overview, key results,
@@ -977,6 +980,86 @@ Options considered:
 
 ---
 
+## Day 9: Serving layer on GitHub (16 Nov 2026)
+
+### Problem
+- The app queried Databricks directly. When the serverless warehouse was
+  asleep, slow, or out of Free Edition compute, the app showed errors
+  (RequestError / ThriftBackend) - exactly what a recruiter might see
+- Goal: the app must ALWAYS load, even when Databricks is unavailable
+
+### Options considered
+- Keep retrying Databricks -> still fails when the warehouse is down
+- Cloudflare R2 (object storage) -> rejected: needs a credit card
+- **GitHub branch as a serving layer -> chosen** (free, already used,
+  public raw file URLs, no new account)
+
+### Design: separate processing from serving
+- Databricks = processing (bronze, silver, gold, checks, forecast)
+- GitHub branch `serving-data`, folder `serving/` = serving (small CSVs)
+- Separate branch (not main) so the pipeline's frequent commits never cause
+  "rejected, fetch first" conflicts when I push code
+- The branch must NEVER be merged into main (ignore GitHub's
+  "Compare & pull request" banner)
+
+### Files published after every run
+| File | Contents | Rows (first run) |
+|---|---|---|
+| live_latest.csv | Latest hour, every city | 294 |
+| live_history.csv | City PM2.5, last 7 days | 546 |
+| stations.csv | Station coordinates (for OpenAQ matching) | 597 |
+| forecast_delhi_2019.csv | Actual vs baseline vs XGBoost | 365 |
+| pipeline_runs.csv | Latest 30 runs | 22 |
+| quality_latest.csv | This run's 6 checks | 6 |
+
+### Pipeline changes (ingestion/fetch_live_aqi.py)
+- SERVING_EXPORTS: one SQL query per CSV file
+- publish_serving_data(): runs each query, converts to CSV with pandas,
+  publishes through the GitHub Contents API (PUT, base64 content, sha for
+  updates)
+- ensure_serving_branch(): creates serving-data from main if missing
+- Only changed files are updated (no empty commits)
+- Runs AFTER log_run, so pipeline_runs.csv includes the current run
+- A publishing failure is logged but NEVER changes the pipeline status
+- No token -> publishing skipped with a message
+- run_sql now reads ALL result chunks (large results arrive in pieces)
+
+### App changes (app/app.py)
+- read_serving(name): reads raw.githubusercontent.com CSVs, cached 10 min
+- load_data(file, query): serving file first, Databricks only as fallback
+- Fallback chain for the city card: serving file -> OpenAQ (if fresher)
+  -> Databricks
+- "Try again" button also clears the serving cache
+- Result: page loads in seconds without waking the warehouse
+
+### Token and secrets
+- Fine-grained GitHub token: only this repository, Contents read and write,
+  expires in 90 days
+- Stored as GH_PUBLISH_TOKEN in .env (laptop) and GitHub Secrets (workflow);
+  passed to the workflow step through `env:`
+- Never pasted in chat, code, or screenshots
+
+### Issues encountered and fixes
+| Issue | Cause | Fix |
+|---|---|---|
+| pip.exe blocked by Device Guard | Windows policy blocks the launcher | Use `python -m pip ...` |
+| No module named dotenv | Ran the system Python, not the venv | `venv\Scripts\activate` first |
+| BadRequest on COPY INTO (first run) | Warehouse still waking up | Rerun; second run succeeded and loaded both files |
+| Risk of breaking the working pipeline | Rebuilding the file from memory | Patched only the real file, adding new functions |
+
+### First successful run
+- Files loaded: 2 (the failed run's file caught up automatically)
+- Readings inserted: 3,942; all 6 quality checks passed
+- Branch serving-data created; all 6 CSVs published; status success
+
+### Lessons
+- Separate processing from serving: dashboards shouldn't depend on compute
+  being awake
+- Idempotent design paid off again: a failed run lost no data
+- Patch working code; don't rewrite it
+
+---
+
 ## Key insights so far (summary)
 1. About 26% of recorded days were Poor or worse; only 5% were Good
 2. Delhi's average AQI fell 25% from 2015 to 2019, improving every year
@@ -1048,6 +1131,9 @@ Options considered:
 - **APIs & integration:** OpenAQ v3 (API key headers, pagination,
   verifying filters), parallel requests (ThreadPoolExecutor), spatial
   matching (haversine nearest neighbour), source fallback
+- **Serving layer:** GitHub REST API (Contents API, refs, base64,
+  sha-based updates), fine-grained tokens, raw file serving, cache TTLs,
+  fallback chains
 - **Operations:** graceful failure handling, connection retries for
   cold starts, Windows Task Scheduler, batch scripts, log files
 - **DevOps:** virtual environments, requirements.txt, .gitignore
@@ -1079,7 +1165,9 @@ Options considered:
 - Runner and a fresh pipeline run start automatically at login
   (Task Scheduler + start_aqi.bat); keep the runner window open
 - Check logs/login_runs.log occasionally; clear it every few weeks
-- Renew the Databricks token before 90 days (in all four places)
+- Renew the Databricks token before 90 days (in all five places)
+- Renew GH_PUBLISH_TOKEN before 90 days (.env and GitHub Secrets)
+- Never merge serving-data into main
 - Update GEMINI_MODEL if Google retires the current model
 
 ### Optional future improvements
@@ -1087,5 +1175,3 @@ Options considered:
 - Add weather data (wind, rain, temperature) to the forecast
 - Test the forecast on other cities and on 2020
 - Move ingestion to an always-on host so runs don't depend on the laptop
-4. Optional: rerun Queries 2, 3, 8 with the corrected filter;
-   test the forecast on other cities and on 2020
