@@ -1,0 +1,7 @@
+check_name,check_value,threshold,passed,severity
+duplicate_readings,0.0,= 0,true,critical
+unknown_pollutant,0.0,= 0,true,warning
+missing_avg_pct,8.95,<= 25,true,warning
+data_age_hours,1.46,<= 3,true,warning
+negative_values,0.0,= 0,true,warning
+row_count,3942.0,>= 1000,true,critical
