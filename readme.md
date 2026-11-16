@@ -43,7 +43,7 @@ This project builds a complete data platform to answer three questions:
 2. **Can people be warned a day in advance** before unhealthy air arrives?
 3. **Can the data be trusted**, given that government sensor data contains gaps and errors?
 
-It combines five years of historical data (2015–2020, 26 cities) with a **live feed** from 550+ government monitoring stations in 270+ cities. A scheduled pipeline stores and quality-checks the data, and the app additionally fetches the **latest readings on demand** through OpenAQ, so it shows near-current air quality at any time.
+It combines five years of historical data (2015–2020, 26 cities) with a **live feed** from 550+ government monitoring stations in 270+ cities. A scheduled pipeline stores and quality-checks the data, and the app additionally fetches the **latest readings on demand** through OpenAQ, so it shows near-current air quality at any time. A lightweight **serving layer** on GitHub keeps the app working even when the Databricks warehouse is asleep or unavailable.
 
 ---
 
@@ -82,6 +82,10 @@ flowchart LR
         L[(Run log)]
     end
 
+    subgraph Serving
+        G[GitHub branch<br/>serving-data<br/>small CSV files]
+    end
+
     subgraph Consumption
         S[Statistics<br/>pandas · SciPy]
         M[Forecast<br/>XGBoost · SHAP]
@@ -97,10 +101,11 @@ flowchart LR
     E --> S
     E --> M
     E --> P
-    E --> W
+    E -->|export after<br/>each run| G
+    L --> G
     M --> P
-    M --> W
-    L --> W
+    G -->|read first| W
+    E -.->|fallback| W
     O -->|on demand,<br/>matched to cities| W
 ```
 
@@ -112,6 +117,8 @@ The platform follows the **medallion architecture**:
 | **Silver** | Typed, cleaned, deduplicated readings | Reliable base for analysis; loaded incrementally |
 | **Gold** | Star schema (`fact_aqi_daily`, `dim_city`, `dim_date`, `dim_pollutant`) and `gold_live_city_hourly` | Business-ready tables for dashboards, models, and the app |
 
+**Serving layer:** processing and serving are kept separate. After every run, the pipeline exports six small result files (latest city readings, 7-day history, stations, forecast, run log, quality checks) to a dedicated `serving-data` branch on GitHub. The app reads these files first and queries Databricks only as a fallback, so it loads in seconds and keeps working when the warehouse is asleep or out of free-tier compute.
+
 ---
 
 ## Features
@@ -120,6 +127,7 @@ The platform follows the **medallion architecture**:
 - **Live ingestion** from a government REST API with pagination, retries with exponential backoff, timeouts, and secret-safe error logging
 - **Scheduled automation** with GitHub Actions on a **self-hosted runner**, chosen because the government API blocks cloud-hosted IPs
 - **Catch-up at login:** a startup script (Windows Task Scheduler) runs the pipeline immediately when the host logs in, then starts the runner, so data is fresh within minutes after any downtime
+- **Serving layer:** after each run, results are exported as small CSV files and published to a separate `serving-data` branch through the GitHub API (only changed files are updated; a publishing failure never fails the pipeline)
 - **Incremental, idempotent loading**: `COPY INTO` loads only new files; `MERGE` inserts only new readings
 - **Star schema** data model with surrogate keys and a date dimension built for future data
 - **PySpark** silver layer, partitioned by year and verified identical to the SQL implementation
@@ -137,7 +145,7 @@ The platform follows the **medallion architecture**:
 - **Streamlit web app** designed for non-technical users: city status card with health advice, city comparison, forecast explained in plain language, and a data-trust page
 - **AI daily briefing** generated with Google Gemini, **grounded** in pre-computed facts to prevent hallucinated numbers, and cached once per data update
 - **Always current:** the government API blocks cloud servers, so the app fetches the latest PM2.5 from **OpenAQ** (which collects the same CPCB stations), downloads pages in parallel, matches stations to cities by **nearest-station distance**, and falls back to the pipeline's data if OpenAQ is unavailable
-- **Resilient by design:** reuses one database connection, retries patiently while the serverless warehouse wakes up, and shows a friendly "waking up" message with a retry button instead of an error
+- **Resilient by design:** reads pre-exported files from the serving layer first; if Databricks is needed it reuses one database connection, retries patiently while the serverless warehouse wakes up, and shows a friendly "waking up" message with a retry button instead of an error
 
 ---
 
@@ -174,6 +182,7 @@ Every run is recorded in a **run log** (status, rows loaded, failed checks, erro
 | Processing | PySpark, pandas |
 | Lakehouse | Databricks, Delta Lake, Unity Catalog volumes |
 | Orchestration | GitHub Actions (self-hosted runner) |
+| Serving | GitHub branch (CSV files via GitHub REST API) |
 | Statistics & ML | SciPy, scikit-learn, XGBoost, SHAP |
 | BI | Power BI (DAX, Power Query) |
 | Application | Streamlit, Plotly |
@@ -190,7 +199,7 @@ aqi-india-data-platform/
 ├── app/
 │   └── app.py                     # Streamlit application
 ├── ingestion/
-│   └── fetch_live_aqi.py          # Live pipeline: extract, load, transform, checks, logging
+│   └── fetch_live_aqi.py          # Live pipeline: extract, load, transform, checks, logging, publish
 ├── sql/
 │   ├── 01_bronze.sql              # Bronze tables and profiling
 │   ├── 02_silver.sql              # Silver layer (SQL)
@@ -210,20 +219,23 @@ aqi-india-data-platform/
 ├── .streamlit/config.toml         # App theme
 ├── start_aqi.bat                  # Login startup: run pipeline now, then start the runner
 └── requirements.txt
+
+Branch serving-data (separate, never merged into main)
+└── serving/                       # CSV files published by the pipeline and read by the app
 ```
 
 ---
 
 ## Getting started
 
-**Prerequisites:** Python 3.13, a Databricks workspace with a SQL warehouse, a data.gov.in API key, and (optionally) a Google Gemini API key.
+**Prerequisites:** Python 3.13, a Databricks workspace with a SQL warehouse, a data.gov.in API key, and (optionally) a Google Gemini API key, an OpenAQ API key, and a fine-grained GitHub token (this repository only, Contents: read and write) for publishing the serving files.
 
 ```bash
 git clone https://github.com/Janvi-Sanghavi/aqi-india-data-platform.git
 cd aqi-india-data-platform
 python -m venv venv
 venv\Scripts\activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Configure credentials in `.env` (pipeline) and `.streamlit/secrets.toml` (app), then:
@@ -251,7 +263,7 @@ Full setup, monitoring, and troubleshooting instructions are in the **[runbook](
 - Live readings are hourly, while India's PM2.5 safe limit applies to a 24-hour average, so comparisons with the limit are indicative.
 - The forecast is evaluated on Delhi only and does not use weather data, so it can underestimate sudden extreme spikes.
 - The app's on-demand readings come from OpenAQ and are matched to cities by distance (within 10 km), so they can differ slightly from the pipeline's figures.
-- Scheduled runs pause while the self-hosted runner (a laptop) is offline; the login startup script and the incremental design catch up automatically, and the app always shows how old the data is.
+- Scheduled runs pause while the self-hosted runner (a laptop) is offline; the login startup script and the incremental design catch up automatically, the app keeps serving the last published files, and it always shows how old the data is.
 
 ---
 
